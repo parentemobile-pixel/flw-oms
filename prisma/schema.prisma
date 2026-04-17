@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// ============================================
+// INVENTORY BUY PLANNER
+// ============================================
+model InventoryConfig {
+  id               String   @id @default(cuid())
+  shop             String
+  shopifyProductId String
+  shopifyVariantId String?
+  minInventoryLevel Int     @default(0)
+  coverageDays     Int      @default(90)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([shop, shopifyProductId, shopifyVariantId])
+  @@index([shop])
+}
+
+model SalesSnapshot {
+  id               String   @id @default(cuid())
+  shop             String
+  shopifyProductId String
+  shopifyVariantId String
+  periodStart      DateTime
+  periodType       String   // "weekly" | "monthly"
+  quantitySold     Int
+  revenue          Float
+  createdAt        DateTime @default(now())
+
+  @@unique([shop, shopifyVariantId, periodStart, periodType])
+  @@index([shop, shopifyProductId])
+  @@index([periodStart])
+}
+
+model SyncStatus {
+  id            String   @id @default(cuid())
+  shop          String   @unique
+  lastSyncAt    DateTime
+  lastOrderDate DateTime?
+  status        String   @default("idle") // "idle" | "syncing" | "error"
+  error         String?
+  updatedAt     DateTime @updatedAt
+}
+
+// ============================================
+// PURCHASE ORDERS
+// ============================================
+model PurchaseOrder {
+  id           String    @id @default(cuid())
+  shop         String
+  poNumber     String
+  vendor       String?
+  status       String    @default("draft") // draft | ordered | partially_received | received | cancelled
+  notes        String?
+  orderDate    DateTime?
+  expectedDate DateTime?
+  totalCost    Float     @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  lineItems PurchaseOrderLineItem[]
+
+  @@unique([shop, poNumber])
+  @@index([shop, status])
+}
+
+model PurchaseOrderLineItem {
+  id               String   @id @default(cuid())
+  purchaseOrderId  String
+  shopifyProductId String
+  shopifyVariantId String
+  productTitle     String
+  variantTitle     String
+  sku              String?
+  barcode          String?
+  unitCost         Float    @default(0)
+  retailPrice      Float    @default(0)
+  quantityOrdered  Int      @default(0)
+  quantityReceived Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+  @@index([shopifyVariantId])
+}
+
+// ============================================
+// PRODUCT BUILDER
+// ============================================
+model ProductTemplate {
+  id            String   @id @default(cuid())
+  shop          String
+  name          String
+  category      String   // "mens" | "womens" | "other"
+  defaultVendor String?
+  skuPattern    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([shop])
+}

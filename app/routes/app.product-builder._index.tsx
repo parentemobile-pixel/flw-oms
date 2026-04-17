@@ -1,0 +1,1337 @@
+import { useState, useCallback, useEffect } from "react";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
+import { json } from "@remix-run/node";
+import {
+  useLoaderData,
+  useActionData,
+  useSubmit,
+  useNavigation,
+  useRouteError,
+  isRouteErrorResponse,
+} from "@remix-run/react";
+import {
+  Page,
+  Layout,
+  Card,
+  FormLayout,
+  TextField,
+  Button,
+  Banner,
+  Tag,
+  InlineStack,
+  BlockStack,
+  Text,
+  DataTable,
+  Autocomplete,
+  Icon,
+  ButtonGroup,
+  DropZone,
+  Thumbnail,
+  Modal,
+  Checkbox,
+  Select,
+  RadioButton,
+  Divider,
+} from "@shopify/polaris";
+import { SearchIcon, PlusIcon, DeleteIcon } from "@shopify/polaris-icons";
+
+import { authenticate } from "../shopify.server";
+import {
+  createProduct,
+  getVendors,
+  getMetafieldDefinitions,
+  getExistingOptionValues,
+  getPublications,
+  publishProductToChannels,
+} from "../services/shopify-api/products.server";
+import type {
+  ProductOption,
+  MetafieldInput,
+  MetafieldDefinition,
+  ExistingOptionValues,
+  Publication,
+} from "../services/shopify-api/products.server";
+import { MENS_SIZES, WOMENS_SIZES } from "../utils/constants";
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { admin } = await authenticate.admin(request);
+  let vendors: string[] = [];
+  let metafieldDefs: MetafieldDefinition[] = [];
+  let existingOptions: ExistingOptionValues = {};
+  let publications: Publication[] = [];
+  try {
+    vendors = await getVendors(admin);
+  } catch (error) {
+    console.error("Failed to fetch vendors:", error);
+  }
+  try {
+    metafieldDefs = await getMetafieldDefinitions(admin);
+  } catch (error) {
+    console.error("Failed to fetch metafield definitions:", error);
+  }
+  try {
+    existingOptions = await getExistingOptionValues(admin);
+  } catch (error) {
+    console.error("Failed to fetch existing options:", error);
+  }
+  try {
+    publications = await getPublications(admin);
+  } catch (error) {
+    console.error("Failed to fetch publications:", error);
+  }
+  return json({ vendors, metafieldDefs, existingOptions, publications });
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { admin } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const intent = formData.get("intent") as string;
+
+  const title = formData.get("title") as string;
+  const vendor = formData.get("vendor") as string;
+  const price = formData.get("price") as string;
+  const cost = formData.get("cost") as string;
+  const skuPrefix = formData.get("skuPrefix") as string;
+  const imageUrl = formData.get("imageUrl") as string;
+  const selectedPublications = JSON.parse(
+    (formData.get("publications") as string) || "[]",
+  ) as string[];
+  const options = JSON.parse(
+    (formData.get("options") as string) || "[]",
+  ) as ProductOption[];
+  const metafields = JSON.parse(
+    (formData.get("metafields") as string) || "[]",
+  ) as MetafieldInput[];
+  const tags = JSON.parse(
+    (formData.get("tags") as string) || "[]",
+  ) as string[];
+
+  if (!title || !vendor || !price) {
+    return json({
+      error: "Please fill in all required fields (title, vendor, price).",
+    });
+  }
+
+  try {
+    const result = await createProduct(admin, {
+      title,
+      vendor,
+      options,
+      price,
+      cost: cost || undefined,
+      skuPrefix: skuPrefix || undefined,
+      metafields: metafields.length > 0 ? metafields : undefined,
+      imageUrl: imageUrl || undefined,
+      tags: tags.length > 0 ? tags : undefined,
+    });
+
+    if (result.userErrors?.length > 0) {
+      return json({
+        error: result.userErrors
+          .map((e: { message: string }) => e.message)
+          .join(", "),
+      });
+    }
+
+    const variantCount = result.product?.variants?.edges?.length || 0;
+    const productId = result.product?.id;
+    const productNumericId = productId
+      ? String(productId).replace("gid://shopify/Product/", "")
+      : null;
+
+    // Publish to selected sales channels
+    if (productId && selectedPublications.length > 0) {
+      try {
+        await publishProductToChannels(admin, productId, selectedPublications);
+      } catch (error) {
+        console.error("Failed to publish to channels:", error);
+      }
+    }
+
+    return json({
+      success: true,
+      variantCount,
+      productId,
+      productNumericId,
+      title,
+      intent,
+    });
+  } catch (error) {
+    return json({ error: `Failed to create product: ${error}` });
+  }
+};
+
+interface OptionState {
+  id: string;
+  name: string;
+  values: string[];
+  newValue: string;
+}
+
+function getInitialState() {
+  return {
+    title: "",
+    vendor: "",
+    vendorInput: "",
+    price: "",
+    cost: "",
+    skuPrefix: "",
+    metafieldValues: {} as Record<string, string>,
+    options: [
+      { id: "size", name: "Size", values: [], newValue: "" },
+      { id: "color", name: "Color", values: [], newValue: "" },
+    ] as OptionState[],
+    imageFile: null as File | null,
+    imagePreview: "",
+    uploadedImageUrl: "",
+  };
+}
+
+export default function ProductBuilder() {
+  const loaderData = useLoaderData<typeof loader>();
+  const vendors = loaderData?.vendors || [];
+  const metafieldDefs = (loaderData?.metafieldDefs || []) as MetafieldDefinition[];
+  const existingOptions = (loaderData?.existingOptions || {}) as ExistingOptionValues;
+  const publications = (loaderData?.publications || []) as Publication[];
+  const actionData = useActionData<typeof action>();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const isSubmitting = navigation.state === "submitting";
+
+  const [title, setTitle] = useState("");
+  const [vendor, setVendor] = useState("");
+  const [vendorInput, setVendorInput] = useState("");
+  const [price, setPrice] = useState("");
+  const [cost, setCost] = useState("");
+  const [skuPrefix, setSkuPrefix] = useState("");
+  const [metafieldValues, setMetafieldValues] = useState<Record<string, string>>({});
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState("");
+  const [uploadedImageUrl, setUploadedImageUrl] = useState("");
+
+  // Tagging questions
+  const [isFLWBrand, setIsFLWBrand] = useState<"yes" | "no" | "">("");
+  const [isFLWCore, setIsFLWCore] = useState<"yes" | "no" | "">("");
+  const [hasSeason, setHasSeason] = useState<"yes" | "no" | "">("");
+  const [selectedSeason, setSelectedSeason] = useState("");
+
+  const [options, setOptions] = useState<OptionState[]>([
+    { id: "size", name: "Size", values: [], newValue: "" },
+    { id: "color", name: "Color", values: [], newValue: "" },
+  ]);
+
+  // Sales channels - default all selected
+  const [selectedPubs, setSelectedPubs] = useState<string[]>(
+    publications.map((p) => p.id),
+  );
+
+  // Add vendor modal
+  const [addVendorModalOpen, setAddVendorModalOpen] = useState(false);
+  const [newVendorName, setNewVendorName] = useState("");
+
+  // Success state for "Save & Create Another"
+  const [successBanner, setSuccessBanner] = useState<{
+    title: string;
+    productNumericId: string;
+    variantCount: number;
+  } | null>(null);
+
+  // Clear form on successful "Save & Create Another"
+  useEffect(() => {
+    if (
+      actionData &&
+      "success" in actionData &&
+      actionData.intent === "saveAndNew"
+    ) {
+      setSuccessBanner({
+        title: String(actionData.title),
+        productNumericId: String(actionData.productNumericId || ""),
+        variantCount: Number(actionData.variantCount),
+      });
+      // Reset form
+      setTitle("");
+      setVendor("");
+      setVendorInput("");
+      setPrice("");
+      setCost("");
+      setSkuPrefix("");
+      setMetafieldValues({});
+      setImageFile(null);
+      setImagePreview("");
+      setUploadedImageUrl("");
+      setOptions([
+        { id: "size", name: "Size", values: [], newValue: "" },
+        { id: "color", name: "Color", values: [], newValue: "" },
+      ]);
+      setSelectedPubs(publications.map((p) => p.id));
+      setIsFLWBrand("");
+      setIsFLWCore("");
+      setHasSeason("");
+      setSelectedSeason("");
+    }
+  }, [actionData, publications]);
+
+  // Build tags from tagging questions
+  const computedTags: string[] = [];
+  if (isFLWBrand === "yes") {
+    computedTags.push("FLW Brand");
+    if (isFLWCore === "yes") computedTags.push("FLWCore");
+  } else if (isFLWBrand === "no") {
+    computedTags.push("Partner Brand");
+    if (hasSeason === "yes" && selectedSeason) computedTags.push(selectedSeason);
+  }
+
+  // Publication toggle handler
+  const handleTogglePub = useCallback((pubId: string) => {
+    setSelectedPubs((prev) =>
+      prev.includes(pubId) ? prev.filter((id) => id !== pubId) : [...prev, pubId],
+    );
+  }, []);
+
+  // Image handling
+  const handleDropImage = useCallback((_dropFiles: File[], acceptedFiles: File[]) => {
+    if (acceptedFiles.length > 0) {
+      const file = acceptedFiles[0];
+      setImageFile(file);
+      setImagePreview(URL.createObjectURL(file));
+      setUploadedImageUrl("");
+    }
+  }, []);
+
+  const handleRemoveImage = useCallback(() => {
+    setImageFile(null);
+    setImagePreview("");
+    setUploadedImageUrl("");
+  }, []);
+
+  // Upload image via staged upload before submitting product
+  const uploadImage = useCallback(async (): Promise<string> => {
+    if (!imageFile) return "";
+    if (uploadedImageUrl) return uploadedImageUrl;
+
+    try {
+      // Step 1: Get staged upload target
+      const stageForm = new FormData();
+      stageForm.set("filename", imageFile.name);
+      stageForm.set("mimeType", imageFile.type);
+      stageForm.set("fileSize", String(imageFile.size));
+
+      const stageRes = await fetch("/api/staged-upload", {
+        method: "POST",
+        body: stageForm,
+      });
+      const stageData = await stageRes.json();
+      if (stageData.error) throw new Error(stageData.error);
+
+      const target = stageData.target;
+
+      // Step 2: Upload file to staged target
+      const uploadForm = new FormData();
+      for (const param of target.parameters) {
+        uploadForm.append(param.name, param.value);
+      }
+      uploadForm.append("file", imageFile);
+
+      await fetch(target.url, { method: "POST", body: uploadForm });
+
+      // Step 3: Return the resourceUrl for product creation
+      setUploadedImageUrl(target.resourceUrl);
+      return target.resourceUrl;
+    } catch (error) {
+      console.error("Image upload failed:", error);
+      return "";
+    }
+  }, [imageFile, uploadedImageUrl]);
+
+  // Vendor autocomplete - include "(+ Add new vendor)" option
+  const ADD_VENDOR_VALUE = "__ADD_NEW_VENDOR__";
+  const vendorOptions = [
+    ...vendors
+      .filter(
+        (v: string) =>
+          !vendorInput || v.toLowerCase().includes(vendorInput.toLowerCase()),
+      )
+      .map((v: string) => ({ value: v, label: v })),
+    { value: ADD_VENDOR_VALUE, label: "+ Add new vendor" },
+  ];
+
+  const handleVendorSelect = useCallback(
+    (selected: string[]) => {
+      const val = selected[0] || "";
+      if (val === ADD_VENDOR_VALUE) {
+        setAddVendorModalOpen(true);
+        return;
+      }
+      setVendor(val);
+      setVendorInput(val);
+    },
+    [],
+  );
+
+  const handleAddVendorConfirm = useCallback(() => {
+    if (newVendorName.trim()) {
+      setVendor(newVendorName.trim());
+      setVendorInput(newVendorName.trim());
+    }
+    setAddVendorModalOpen(false);
+    setNewVendorName("");
+  }, [newVendorName]);
+
+  // Size quick-fill
+  const handleFillMens = useCallback(() => {
+    setOptions((prev) =>
+      prev.map((opt) =>
+        opt.name === "Size" ? { ...opt, values: [...MENS_SIZES] } : opt,
+      ),
+    );
+  }, []);
+
+  const handleFillWomens = useCallback(() => {
+    setOptions((prev) =>
+      prev.map((opt) =>
+        opt.name === "Size" ? { ...opt, values: [...WOMENS_SIZES] } : opt,
+      ),
+    );
+  }, []);
+
+  // Option management
+  const handleAddValue = useCallback((optionId: string) => {
+    setOptions((prev) =>
+      prev.map((opt) => {
+        if (opt.id !== optionId || !opt.newValue.trim()) return opt;
+        if (opt.values.includes(opt.newValue.trim()))
+          return { ...opt, newValue: "" };
+        return {
+          ...opt,
+          values: [...opt.values, opt.newValue.trim()],
+          newValue: "",
+        };
+      }),
+    );
+  }, []);
+
+  const handleRemoveValue = useCallback((optionId: string, value: string) => {
+    setOptions((prev) =>
+      prev.map((opt) =>
+        opt.id === optionId
+          ? { ...opt, values: opt.values.filter((v) => v !== value) }
+          : opt,
+      ),
+    );
+  }, []);
+
+  const handleOptionNameChange = useCallback(
+    (optionId: string, name: string) => {
+      setOptions((prev) =>
+        prev.map((opt) => (opt.id === optionId ? { ...opt, name } : opt)),
+      );
+    },
+    [],
+  );
+
+  const handleNewValueChange = useCallback(
+    (optionId: string, value: string) => {
+      setOptions((prev) =>
+        prev.map((opt) =>
+          opt.id === optionId ? { ...opt, newValue: value } : opt,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleAddOption = useCallback(() => {
+    setOptions((prev) => [
+      ...prev,
+      { id: `option-${Date.now()}`, name: "", values: [], newValue: "" },
+    ]);
+  }, []);
+
+  const handleRemoveOption = useCallback((optionId: string) => {
+    setOptions((prev) => prev.filter((opt) => opt.id !== optionId));
+  }, []);
+
+  // Add existing option value
+  const handleAddExistingValue = useCallback(
+    (optionId: string, value: string) => {
+      setOptions((prev) =>
+        prev.map((opt) => {
+          if (opt.id !== optionId) return opt;
+          if (opt.values.includes(value)) return opt;
+          return { ...opt, values: [...opt.values, value] };
+        }),
+      );
+    },
+    [],
+  );
+
+  const handleMetafieldChange = useCallback((key: string, value: string) => {
+    setMetafieldValues((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  // Submit
+  const handleSubmit = useCallback(
+    async (intent: string) => {
+      const activeOptions: ProductOption[] = options
+        .filter((opt) => opt.name && opt.values.length > 0)
+        .map((opt) => ({ name: opt.name, values: opt.values }));
+
+      const metafields: MetafieldInput[] = Object.entries(metafieldValues)
+        .filter(([, value]) => value.trim())
+        .map(([key, value]) => {
+          const def = metafieldDefs.find(
+            (d) => `${d.namespace}.${d.key}` === key,
+          );
+          return {
+            namespace: def?.namespace || "",
+            key: def?.key || "",
+            value,
+            type: def?.type || "single_line_text_field",
+          };
+        })
+        .filter((mf) => mf.namespace && mf.key);
+
+      // Upload image first if present
+      let imageUrl = "";
+      if (imageFile) {
+        imageUrl = await uploadImage();
+      }
+
+      const formData = new FormData();
+      formData.set("intent", intent);
+      formData.set("title", title);
+      formData.set("vendor", vendor || vendorInput);
+      formData.set("price", price);
+      formData.set("cost", cost);
+      formData.set("skuPrefix", skuPrefix);
+      formData.set("options", JSON.stringify(activeOptions));
+      formData.set("metafields", JSON.stringify(metafields));
+      if (imageUrl) formData.set("imageUrl", imageUrl);
+      formData.set("publications", JSON.stringify(selectedPubs));
+      formData.set("tags", JSON.stringify(computedTags));
+      submit(formData, { method: "post" });
+    },
+    [
+      title,
+      vendor,
+      vendorInput,
+      price,
+      cost,
+      skuPrefix,
+      options,
+      selectedPubs,
+      computedTags,
+      metafieldValues,
+      metafieldDefs,
+      imageFile,
+      uploadImage,
+      submit,
+    ],
+  );
+
+  // Variant preview
+  const activeOptions = options.filter(
+    (opt) => opt.name && opt.values.length > 0,
+  );
+  const variantPreview: string[][] = [];
+
+  if (activeOptions.length > 0) {
+    const generateCombos = (opts: OptionState[]): string[][] => {
+      if (opts.length === 0) return [[]];
+      const [first, ...rest] = opts;
+      const restCombos = generateCombos(rest);
+      const combos: string[][] = [];
+      for (const val of first.values) {
+        for (const rc of restCombos) {
+          combos.push([val, ...rc]);
+        }
+      }
+      return combos;
+    };
+    const combos = generateCombos(activeOptions);
+    for (const combo of combos) {
+      const skuParts = combo.map((v) =>
+        v.toUpperCase().replace(/\s+/g, ""),
+      );
+      const sku = skuPrefix ? [skuPrefix, ...skuParts].join("-") : "";
+      variantPreview.push([...combo, sku, price ? `$${price}` : ""]);
+    }
+  }
+
+  const previewHeadings = [
+    ...activeOptions.map((o) => o.name),
+    "SKU",
+    "Price",
+  ];
+  const previewContentTypes: Array<"text" | "numeric"> = [
+    ...activeOptions.map(() => "text" as const),
+    "text" as const,
+    "numeric" as const,
+  ];
+
+  const effectiveVendor = vendor || vendorInput;
+
+  // Get suggested values for an option from existing store data
+  const getSuggestedValues = (optionName: string): string[] => {
+    if (!optionName) return [];
+    // Look for exact match first, then case-insensitive
+    const values =
+      existingOptions[optionName] ||
+      existingOptions[
+        Object.keys(existingOptions).find(
+          (k) => k.toLowerCase() === optionName.toLowerCase(),
+        ) || ""
+      ];
+    return values || [];
+  };
+
+  return (
+    <Page
+      title="Product Builder"
+      subtitle="Create new products with auto-generated variants"
+    >
+      <Layout>
+        {/* Success banner for Save & Create Another */}
+        {successBanner && (
+          <Layout.Section>
+            <Banner
+              tone="success"
+              onDismiss={() => setSuccessBanner(null)}
+              action={
+                successBanner.productNumericId
+                  ? {
+                      content: "View product",
+                      url: `shopify:admin/products/${successBanner.productNumericId}`,
+                    }
+                  : undefined
+              }
+            >
+              &ldquo;{successBanner.title}&rdquo; created with{" "}
+              {successBanner.variantCount} variant
+              {successBanner.variantCount !== 1 ? "s" : ""}!
+            </Banner>
+          </Layout.Section>
+        )}
+
+        {/* Action error / Save & Open success */}
+        {actionData && "error" in actionData && (
+          <Layout.Section>
+            <Banner tone="critical">{String(actionData.error)}</Banner>
+          </Layout.Section>
+        )}
+        {actionData &&
+          "success" in actionData &&
+          actionData.intent === "saveAndOpen" && (
+            <Layout.Section>
+              <Banner
+                tone="success"
+                action={
+                  actionData.productNumericId
+                    ? {
+                        content: "View in Shopify",
+                        url: `shopify:admin/products/${actionData.productNumericId}`,
+                      }
+                    : undefined
+                }
+              >
+                Product created with {Number(actionData.variantCount)} variant
+                {Number(actionData.variantCount) !== 1 ? "s" : ""}!
+              </Banner>
+            </Layout.Section>
+          )}
+
+        {/* Product Details + Image */}
+        <Layout.Section>
+          <Card>
+            <InlineStack gap="400" wrap={false} blockAlign="start">
+              {/* Image - compact left side */}
+              <div style={{ width: "120px", minWidth: "120px" }}>
+                {imagePreview ? (
+                  <BlockStack gap="200" inlineAlign="center">
+                    <Thumbnail
+                      source={imagePreview}
+                      alt="Product image preview"
+                      size="large"
+                    />
+                    <Button
+                      variant="plain"
+                      tone="critical"
+                      size="slim"
+                      onClick={handleRemoveImage}
+                    >
+                      Remove
+                    </Button>
+                  </BlockStack>
+                ) : (
+                  <DropZone
+                    accept="image/*"
+                    type="image"
+                    onDrop={handleDropImage}
+                    allowMultiple={false}
+                  >
+                    <BlockStack inlineAlign="center" gap="100">
+                      <Icon source={PlusIcon} />
+                      <Text as="p" variant="bodySm" alignment="center">Image</Text>
+                    </BlockStack>
+                  </DropZone>
+                )}
+              </div>
+
+              {/* Details - right side */}
+              <div style={{ flex: 1 }}>
+                <BlockStack gap="400">
+                  <Text as="h2" variant="headingMd">
+                    Product Details
+                  </Text>
+                  <FormLayout>
+                    <TextField
+                      label="Product Title"
+                      value={title}
+                      onChange={setTitle}
+                      autoComplete="off"
+                      requiredIndicator
+                    />
+                    <Autocomplete
+                      options={vendorOptions}
+                      selected={vendor ? [vendor] : []}
+                      onSelect={handleVendorSelect}
+                      textField={
+                        <Autocomplete.TextField
+                          label="Vendor"
+                          value={vendorInput}
+                          onChange={(val: string) => {
+                            setVendorInput(val);
+                            setVendor(val);
+                          }}
+                          placeholder="Search or type vendor name..."
+                          autoComplete="off"
+                          requiredIndicator
+                          prefix={<Icon source={SearchIcon} />}
+                        />
+                      }
+                    />
+                  </FormLayout>
+                </BlockStack>
+              </div>
+            </InlineStack>
+          </Card>
+        </Layout.Section>
+
+        {/* Brand & Tagging */}
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <Text as="h2" variant="headingMd">
+                Brand &amp; Tags
+              </Text>
+
+              <BlockStack gap="200">
+                <Text as="p" variant="bodyMd" fontWeight="semibold">
+                  Is this an FLW Branded Item?
+                </Text>
+                <InlineStack gap="400">
+                  <RadioButton
+                    label="Yes"
+                    checked={isFLWBrand === "yes"}
+                    id="flw-brand-yes"
+                    onChange={() => {
+                      setIsFLWBrand("yes");
+                      setHasSeason("");
+                      setSelectedSeason("");
+                    }}
+                  />
+                  <RadioButton
+                    label="No"
+                    checked={isFLWBrand === "no"}
+                    id="flw-brand-no"
+                    onChange={() => {
+                      setIsFLWBrand("no");
+                      setIsFLWCore("");
+                    }}
+                  />
+                </InlineStack>
+              </BlockStack>
+
+              {isFLWBrand === "yes" && (
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodyMd" fontWeight="semibold">
+                    Consider this an FLW Core Item?
+                  </Text>
+                  <InlineStack gap="400">
+                    <RadioButton
+                      label="Yes"
+                      checked={isFLWCore === "yes"}
+                      id="flw-core-yes"
+                      onChange={() => setIsFLWCore("yes")}
+                    />
+                    <RadioButton
+                      label="No"
+                      checked={isFLWCore === "no"}
+                      id="flw-core-no"
+                      onChange={() => setIsFLWCore("no")}
+                    />
+                  </InlineStack>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    FLW Core items are reviewed monthly for re-ordering.
+                  </Text>
+                </BlockStack>
+              )}
+
+              {isFLWBrand === "no" && (
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodyMd" fontWeight="semibold">
+                    Associate this to a season?
+                  </Text>
+                  <InlineStack gap="400">
+                    <RadioButton
+                      label="Yes"
+                      checked={hasSeason === "yes"}
+                      id="season-yes"
+                      onChange={() => setHasSeason("yes")}
+                    />
+                    <RadioButton
+                      label="No"
+                      checked={hasSeason === "no"}
+                      id="season-no"
+                      onChange={() => {
+                        setHasSeason("no");
+                        setSelectedSeason("");
+                      }}
+                    />
+                  </InlineStack>
+                  {hasSeason === "yes" && (
+                    <Select
+                      label="Season"
+                      options={[
+                        { label: "Select a season...", value: "" },
+                        { label: "Fall/Winter 2025", value: "FW25" },
+                        { label: "Spring/Summer 2026", value: "SS26" },
+                        { label: "Fall/Winter 2026", value: "FW26" },
+                        { label: "Spring/Summer 2027", value: "SS27" },
+                        { label: "Fall/Winter 2027", value: "FW27" },
+                      ]}
+                      value={selectedSeason}
+                      onChange={setSelectedSeason}
+                    />
+                  )}
+                </BlockStack>
+              )}
+
+              {computedTags.length > 0 && (
+                <>
+                  <Divider />
+                  <BlockStack gap="200">
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Tags that will be applied:
+                    </Text>
+                    <InlineStack gap="200">
+                      {computedTags.map((tag) => (
+                        <Tag key={tag}>{tag}</Tag>
+                      ))}
+                    </InlineStack>
+                  </BlockStack>
+                </>
+              )}
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
+        {/* Pricing */}
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <Text as="h2" variant="headingMd">
+                Pricing
+              </Text>
+              <FormLayout>
+                <FormLayout.Group>
+                  <TextField
+                    label="Price"
+                    value={price}
+                    onChange={setPrice}
+                    autoComplete="off"
+                    type="number"
+                    prefix="$"
+                    requiredIndicator
+                  />
+                  <TextField
+                    label="Cost per item"
+                    value={cost}
+                    onChange={setCost}
+                    autoComplete="off"
+                    type="number"
+                    prefix="$"
+                  />
+                </FormLayout.Group>
+                <TextField
+                  label="SKU Prefix"
+                  value={skuPrefix}
+                  onChange={setSkuPrefix}
+                  autoComplete="off"
+                  placeholder="e.g., FLW-VENDOR"
+                  helpText="Auto-generates SKUs like PREFIX-VALUE1-VALUE2"
+                />
+              </FormLayout>
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
+        {/* Variant Options */}
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <InlineStack align="space-between">
+                <Text as="h2" variant="headingMd">
+                  Variant Options
+                </Text>
+                <Button onClick={handleAddOption} icon={PlusIcon} size="slim">
+                  Add Option
+                </Button>
+              </InlineStack>
+              <Text as="p" variant="bodySm" tone="subdued">
+                None are required. Add Size, Color, Material, or any custom
+                option.
+              </Text>
+
+              {options.map((option) => {
+                const suggested = getSuggestedValues(option.name);
+                const unusedSuggested = suggested.filter(
+                  (s) => !option.values.includes(s),
+                );
+
+                return (
+                  <Card key={option.id}>
+                    <BlockStack gap="300">
+                      <InlineStack
+                        align="space-between"
+                        blockAlign="center"
+                      >
+                        <div style={{ flex: 1, maxWidth: "250px" }}>
+                          <TextField
+                            label="Option name"
+                            value={option.name}
+                            onChange={(val: string) =>
+                              handleOptionNameChange(option.id, val)
+                            }
+                            autoComplete="off"
+                            placeholder="e.g., Size, Color, Material"
+                          />
+                        </div>
+                        <InlineStack gap="200" blockAlign="center">
+                          {option.name === "Size" && (
+                            <InlineStack gap="200" blockAlign="center">
+                              <Text as="span" variant="bodySm" tone="subdued">
+                                Prefill:
+                              </Text>
+                              <ButtonGroup>
+                                <Button
+                                  size="slim"
+                                  onClick={handleFillMens}
+                                >
+                                  Men&apos;s
+                                </Button>
+                                <Button
+                                  size="slim"
+                                  onClick={handleFillWomens}
+                                >
+                                  Women&apos;s
+                                </Button>
+                              </ButtonGroup>
+                            </InlineStack>
+                          )}
+                          {options.length > 1 && (
+                            <Button
+                              icon={DeleteIcon}
+                              variant="plain"
+                              tone="critical"
+                              onClick={() => handleRemoveOption(option.id)}
+                              accessibilityLabel="Remove option"
+                            />
+                          )}
+                        </InlineStack>
+                      </InlineStack>
+
+                      <InlineStack gap="200" blockAlign="end">
+                        <div style={{ flexGrow: 1 }}>
+                          <TextField
+                            label="Add value"
+                            labelHidden
+                            value={option.newValue}
+                            onChange={(val: string) =>
+                              handleNewValueChange(option.id, val)
+                            }
+                            autoComplete="off"
+                            placeholder={`Add ${option.name || "option"} value...`}
+                            connectedRight={
+                              <Button
+                                onClick={() => handleAddValue(option.id)}
+                              >
+                                Add
+                              </Button>
+                            }
+                          />
+                        </div>
+                      </InlineStack>
+
+                      {/* Existing values from store */}
+                      {unusedSuggested.length > 0 && (
+                        <BlockStack gap="200">
+                          <Text as="p" variant="bodySm" tone="subdued">
+                            Existing {option.name.toLowerCase()} values in
+                            your store:
+                          </Text>
+                          <InlineStack gap="100" wrap>
+                            {unusedSuggested.slice(0, 20).map((val) => (
+                              <Button
+                                key={val}
+                                size="slim"
+                                onClick={() =>
+                                  handleAddExistingValue(option.id, val)
+                                }
+                              >
+                                + {val}
+                              </Button>
+                            ))}
+                          </InlineStack>
+                        </BlockStack>
+                      )}
+
+                      {option.values.length > 0 && (
+                        <InlineStack gap="200" wrap>
+                          {option.values.map((value) => (
+                            <Tag
+                              key={value}
+                              onRemove={() =>
+                                handleRemoveValue(option.id, value)
+                              }
+                            >
+                              {value}
+                            </Tag>
+                          ))}
+                        </InlineStack>
+                      )}
+                    </BlockStack>
+                  </Card>
+                );
+              })}
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
+        {/* Metafields */}
+        {metafieldDefs.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <Text as="h2" variant="headingMd">
+                  Metafields
+                </Text>
+                <FormLayout>
+                  {metafieldDefs.map((def) => {
+                    const metaKey = `${def.namespace}.${def.key}`;
+                    const mfType = def.type;
+
+                    // Weight fields (e.g., weight)
+                    if (mfType === "weight") {
+                      const parsed = metafieldValues[metaKey] ? (() => { try { return JSON.parse(metafieldValues[metaKey]); } catch { return { value: "", unit: "kg" }; } })() : { value: "", unit: "kg" };
+                      return (
+                        <FormLayout.Group key={metaKey}>
+                          <TextField
+                            label={def.name}
+                            value={String(parsed.value || "")}
+                            onChange={(val: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parseFloat(val) || 0, unit: parsed.unit || "kg" }))
+                            }
+                            autoComplete="off"
+                            type="number"
+                            helpText={def.description || `${def.namespace}.${def.key}`}
+                          />
+                          <Select
+                            label="Unit"
+                            options={[
+                              { label: "kg", value: "kg" },
+                              { label: "g", value: "g" },
+                              { label: "lb", value: "lb" },
+                              { label: "oz", value: "oz" },
+                            ]}
+                            value={parsed.unit || "kg"}
+                            onChange={(unit: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parsed.value || 0, unit }))
+                            }
+                          />
+                        </FormLayout.Group>
+                      );
+                    }
+
+                    // Dimension fields
+                    if (mfType === "dimension") {
+                      const parsed = metafieldValues[metaKey] ? (() => { try { return JSON.parse(metafieldValues[metaKey]); } catch { return { value: "", unit: "in" }; } })() : { value: "", unit: "in" };
+                      return (
+                        <FormLayout.Group key={metaKey}>
+                          <TextField
+                            label={def.name}
+                            value={String(parsed.value || "")}
+                            onChange={(val: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parseFloat(val) || 0, unit: parsed.unit || "in" }))
+                            }
+                            autoComplete="off"
+                            type="number"
+                            helpText={def.description || `${def.namespace}.${def.key}`}
+                          />
+                          <Select
+                            label="Unit"
+                            options={[
+                              { label: "in", value: "in" },
+                              { label: "ft", value: "ft" },
+                              { label: "cm", value: "cm" },
+                              { label: "m", value: "m" },
+                              { label: "mm", value: "mm" },
+                            ]}
+                            value={parsed.unit || "in"}
+                            onChange={(unit: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parsed.value || 0, unit }))
+                            }
+                          />
+                        </FormLayout.Group>
+                      );
+                    }
+
+                    // Volume fields
+                    if (mfType === "volume") {
+                      const parsed = metafieldValues[metaKey] ? (() => { try { return JSON.parse(metafieldValues[metaKey]); } catch { return { value: "", unit: "ml" }; } })() : { value: "", unit: "ml" };
+                      return (
+                        <FormLayout.Group key={metaKey}>
+                          <TextField
+                            label={def.name}
+                            value={String(parsed.value || "")}
+                            onChange={(val: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parseFloat(val) || 0, unit: parsed.unit || "ml" }))
+                            }
+                            autoComplete="off"
+                            type="number"
+                            helpText={def.description || `${def.namespace}.${def.key}`}
+                          />
+                          <Select
+                            label="Unit"
+                            options={[
+                              { label: "ml", value: "ml" },
+                              { label: "L", value: "l" },
+                              { label: "fl oz", value: "us_fl_oz" },
+                              { label: "gal", value: "us_gal" },
+                            ]}
+                            value={parsed.unit || "ml"}
+                            onChange={(unit: string) =>
+                              handleMetafieldChange(metaKey, JSON.stringify({ value: parsed.value || 0, unit }))
+                            }
+                          />
+                        </FormLayout.Group>
+                      );
+                    }
+
+                    // Boolean fields
+                    if (mfType === "boolean") {
+                      return (
+                        <Checkbox
+                          key={metaKey}
+                          label={def.name}
+                          checked={metafieldValues[metaKey] === "true"}
+                          onChange={(checked: boolean) =>
+                            handleMetafieldChange(metaKey, String(checked))
+                          }
+                          helpText={def.description || `${def.namespace}.${def.key}`}
+                        />
+                      );
+                    }
+
+                    // Number fields (integer / decimal)
+                    if (mfType === "number_integer" || mfType === "number_decimal") {
+                      return (
+                        <TextField
+                          key={metaKey}
+                          label={def.name}
+                          value={metafieldValues[metaKey] || ""}
+                          onChange={(val: string) =>
+                            handleMetafieldChange(metaKey, val)
+                          }
+                          autoComplete="off"
+                          type="number"
+                          helpText={
+                            def.description ||
+                            `${def.namespace}.${def.key} (${mfType})`
+                          }
+                        />
+                      );
+                    }
+
+                    // Default: text fields (single_line_text_field, multi_line_text_field, url, etc.)
+                    return (
+                      <TextField
+                        key={metaKey}
+                        label={def.name}
+                        value={metafieldValues[metaKey] || ""}
+                        onChange={(val: string) =>
+                          handleMetafieldChange(metaKey, val)
+                        }
+                        autoComplete="off"
+                        multiline={mfType === "multi_line_text_field" ? 3 : undefined}
+                        helpText={
+                          def.description ||
+                          `${def.namespace}.${def.key} (${mfType})`
+                        }
+                      />
+                    );
+                  })}
+                </FormLayout>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Sales Channels */}
+        {publications.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <Text as="h2" variant="headingMd">
+                  Sales Channels
+                </Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Select which channels this product will be published to.
+                </Text>
+                {publications.map((pub) => (
+                  <Checkbox
+                    key={pub.id}
+                    label={pub.name}
+                    checked={selectedPubs.includes(pub.id)}
+                    onChange={() => handleTogglePub(pub.id)}
+                  />
+                ))}
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Variant Preview */}
+        {variantPreview.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <Text as="h2" variant="headingMd">
+                  Variant Preview ({variantPreview.length} variant
+                  {variantPreview.length !== 1 ? "s" : ""})
+                </Text>
+                <DataTable
+                  columnContentTypes={previewContentTypes}
+                  headings={previewHeadings}
+                  rows={variantPreview}
+                />
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Actions */}
+        <Layout.Section>
+          <InlineStack align="end" gap="200">
+            <Button
+              onClick={() => handleSubmit("saveAndNew")}
+              loading={isSubmitting}
+              disabled={!title || !effectiveVendor || !price}
+            >
+              Save &amp; Create Another
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => handleSubmit("saveAndOpen")}
+              loading={isSubmitting}
+              disabled={!title || !effectiveVendor || !price}
+            >
+              Save &amp; View Product
+            </Button>
+          </InlineStack>
+        </Layout.Section>
+
+        {/* Bottom spacer */}
+        <Layout.Section>
+          <div style={{ height: "2rem" }} />
+        </Layout.Section>
+      </Layout>
+
+      <Modal
+        open={addVendorModalOpen}
+        onClose={() => {
+          setAddVendorModalOpen(false);
+          setNewVendorName("");
+        }}
+        title="Add New Vendor"
+        primaryAction={{
+          content: "Add Vendor",
+          onAction: handleAddVendorConfirm,
+          disabled: !newVendorName.trim(),
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => {
+              setAddVendorModalOpen(false);
+              setNewVendorName("");
+            },
+          },
+        ]}
+      >
+        <Modal.Section>
+          <TextField
+            label="Vendor Name"
+            value={newVendorName}
+            onChange={setNewVendorName}
+            autoComplete="off"
+            placeholder="Enter vendor name..."
+            requiredIndicator
+          />
+        </Modal.Section>
+      </Modal>
+    </Page>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  let message = "Unknown error";
+  let details = "";
+  if (isRouteErrorResponse(error)) {
+    message = `${error.status} ${error.statusText}`;
+    details =
+      typeof error.data === "string" ? error.data : JSON.stringify(error.data);
+  } else if (error instanceof Error) {
+    message = error.message;
+    details = error.stack || "";
+  }
+  return (
+    <Page title="Product Builder - Error">
+      <Layout>
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="400">
+              <Text as="h2" variant="headingMd" tone="critical">
+                Something went wrong
+              </Text>
+              <Text as="p">{message}</Text>
+              {details && (
+                <Text as="p" variant="bodySm" tone="subdued">
+                  <pre
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {details}
+                  </pre>
+                </Text>
+              )}
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+      </Layout>
+    </Page>
+  );
+}

@@ -1,0 +1,29 @@
+# This file stores configurations for your Shopify app.
+
+name = "FLW Management"
+client_id = "2fad5c157c0d7b8d53bbf370b07330f5"
+application_url = "https://flw-oms.fly.dev"
+embedded = true
+
+[auth]
+redirect_urls = [
+  "https://flw-oms.fly.dev/auth/callback",
+  "http://localhost:3000/auth/callback"
+]
+
+[access_scopes]
+scopes = "read_products,write_products,read_orders,read_all_orders,read_inventory,write_inventory,read_publications"
+
+[webhooks]
+api_version = "2024-10"
+
+  [[webhooks.subscriptions]]
+  uri = "https://flw-oms.fly.dev/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "https://flw-oms.fly.dev/webhooks/app/scopes_update"
+
+[build]
+automatically_update_urls_on_dev = true
