@@ -35,7 +35,7 @@
     "@shopify/polaris": "^12.0.0",
     "@shopify/shopify-app-remix": "^4.1.0",
     "@shopify/shopify-app-session-storage-prisma": "^8.0.0",
-    "bwip-js": "^4.8.0",
+    "bwip-js": "^4.9.0",
     "date-fns": "^4.1.0",
     "isbot": "^5.1.0",
     "jspdf": "^4.2.1",
