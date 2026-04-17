@@ -32,7 +32,7 @@ export default function Index() {
   const { poCount, draftPoCount, openPoCount, syncStatus } = useLoaderData<typeof loader>();
 
   return (
-    <Page title="FLW-OMS" subtitle="FL Woods Order Management System">
+    <Page title="FL Woods - OMS" subtitle="FL Woods Order Management System">
       <Layout>
         <Layout.Section>
           <AIChat />
