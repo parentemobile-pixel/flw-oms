@@ -7,6 +7,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ============================================
+// SESSION (Shopify OAuth)
+// ============================================
 model Session {
   id                  String    @id
   shop                String
@@ -28,19 +31,37 @@ model Session {
 }
 
 // ============================================
-// INVENTORY BUY PLANNER
+// SHOPIFY METADATA CACHE
+// ============================================
+// Caches slow Shopify metadata queries (vendors, publications, metafield
+// definitions, locations, option values). See shopify-cache.server.ts.
+model ShopifyCache {
+  id        String   @id @default(cuid())
+  shop      String
+  key       String
+  value     String // JSON-encoded
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, key])
+  @@index([shop])
+}
+
+// ============================================
+// INVENTORY PLANNER
 // ============================================
 model InventoryConfig {
-  id               String   @id @default(cuid())
-  shop             String
-  shopifyProductId String
-  shopifyVariantId String?
-  minInventoryLevel Int     @default(0)
-  coverageDays     Int      @default(90)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                String   @id @default(cuid())
+  shop              String
+  shopifyProductId  String
+  shopifyVariantId  String?
+  shopifyLocationId String? // per-location min levels
+  minInventoryLevel Int      @default(0)
+  coverageDays      Int      @default(90)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  @@unique([shop, shopifyProductId, shopifyVariantId])
+  @@unique([shop, shopifyProductId, shopifyVariantId, shopifyLocationId])
   @@index([shop])
 }
 
@@ -50,7 +71,7 @@ model SalesSnapshot {
   shopifyProductId String
   shopifyVariantId String
   periodStart      DateTime
-  periodType       String   // "weekly" | "monthly"
+  periodType       String // "weekly" | "monthly"
   quantitySold     Int
   revenue          Float
   createdAt        DateTime @default(now())
@@ -61,35 +82,58 @@ model SalesSnapshot {
 }
 
 model SyncStatus {
-  id            String   @id @default(cuid())
-  shop          String   @unique
+  id            String    @id @default(cuid())
+  shop          String    @unique
   lastSyncAt    DateTime
   lastOrderDate DateTime?
-  status        String   @default("idle") // "idle" | "syncing" | "error"
+  status        String    @default("idle") // "idle" | "syncing" | "error"
   error         String?
-  updatedAt     DateTime @updatedAt
+  updatedAt     DateTime  @updatedAt
+}
+
+// Denormalized per-variant snapshot used by the Planning table. Rebuilt
+// on-demand or on a nightly cron.
+model PlanningSnapshot {
+  id                 String   @id @default(cuid())
+  shop               String
+  shopifyProductId   String
+  shopifyVariantId   String
+  periodDays         Int // e.g. 365
+  unitsSold          Int      @default(0)
+  unitsSoldPriorYear Int      @default(0)
+  daysOOS            Int      @default(0) // days out of stock in period
+  generatedAt        DateTime @default(now())
+
+  @@unique([shop, shopifyVariantId, periodDays])
+  @@index([shop, generatedAt])
 }
 
 // ============================================
 // PURCHASE ORDERS
 // ============================================
 model PurchaseOrder {
-  id           String    @id @default(cuid())
-  shop         String
-  poNumber     String
-  vendor       String?
-  status       String    @default("draft") // draft | ordered | partially_received | received | cancelled
-  notes        String?
-  orderDate    DateTime?
-  expectedDate DateTime?
-  totalCost    Float     @default(0)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id                String    @id @default(cuid())
+  shop              String
+  poNumber          String
+  poNumberExt       String? // vendor's own PO #
+  vendor            String?
+  status            String    @default("draft") // draft | ordered | partially_received | received | cancelled
+  notes             String?
+  orderDate         DateTime?
+  shippingDate      DateTime?
+  expectedDate      DateTime?
+  totalCost         Float     @default(0)
+  shopifyLocationId String? // where received inventory lands
+  receiveToken      String    @default(cuid()) // used for scan-to-receive signed URL
+  pdfGeneratedAt    DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   lineItems PurchaseOrderLineItem[]
 
   @@unique([shop, poNumber])
   @@index([shop, status])
+  @@index([receiveToken])
 }
 
 model PurchaseOrderLineItem {
@@ -115,13 +159,129 @@ model PurchaseOrderLineItem {
 }
 
 // ============================================
-// PRODUCT BUILDER
+// INVENTORY TRANSFERS (location-to-location)
+// ============================================
+model InventoryTransfer {
+  id             String    @id @default(cuid())
+  shop           String
+  transferNumber String
+  fromLocationId String
+  toLocationId   String
+  status         String    @default("draft") // draft | in_transit | received | cancelled
+  notes          String?
+  createdAt      DateTime  @default(now())
+  sentAt         DateTime?
+  receivedAt     DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  lineItems InventoryTransferLineItem[]
+
+  @@unique([shop, transferNumber])
+  @@index([shop, status])
+}
+
+model InventoryTransferLineItem {
+  id               String   @id @default(cuid())
+  transferId       String
+  shopifyProductId String
+  shopifyVariantId String
+  productTitle     String
+  variantTitle     String
+  sku              String?
+  quantitySent     Int      @default(0)
+  quantityReceived Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  transfer InventoryTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+
+  @@index([transferId])
+}
+
+// ============================================
+// INVENTORY ADJUSTMENTS (audit log)
+// ============================================
+// A "session" is one grid-based batch adjust (inventory correction, cycle count
+// reconciliation, damaged writedown, etc.). Changes rows record per-variant deltas.
+model InventoryAdjustmentSession {
+  id         String   @id @default(cuid())
+  shop       String
+  locationId String
+  reason     String // Shopify reason enum: correction | cycle_count_accuracy | damaged | received | shrinkage | restock
+  source     String   @default("manual") // manual | po_receive | transfer_receive | stock_count
+  sourceId   String? // e.g. PO id, Transfer id, StockCount id
+  notes      String?
+  createdAt  DateTime @default(now())
+  createdBy  String? // optional user identifier (staff id / email)
+
+  changes InventoryAdjustmentChange[]
+
+  @@index([shop, createdAt])
+  @@index([source, sourceId])
+}
+
+model InventoryAdjustmentChange {
+  id                     String @id @default(cuid())
+  sessionId              String
+  shopifyVariantId       String
+  shopifyInventoryItemId String
+  previousQuantity       Int
+  newQuantity            Int
+  delta                  Int
+
+  session InventoryAdjustmentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([shopifyVariantId])
+}
+
+// ============================================
+// STOCK COUNTS (cycle counts)
+// ============================================
+model StockCount {
+  id          String    @id @default(cuid())
+  shop        String
+  locationId  String
+  name        String
+  status      String    @default("in_progress") // in_progress | completed | abandoned
+  notes       String?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  lineItems StockCountLineItem[]
+
+  @@index([shop, status])
+}
+
+model StockCountLineItem {
+  id               String    @id @default(cuid())
+  stockCountId     String
+  shopifyProductId String
+  shopifyVariantId String
+  productTitle     String
+  variantTitle     String
+  sku              String?
+  barcode          String?
+  expectedQuantity Int // snapshot at count creation
+  countedQuantity  Int? // null until counted
+  countedAt        DateTime?
+  countedBy        String?
+
+  stockCount StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+
+  @@unique([stockCountId, shopifyVariantId])
+  @@index([stockCountId])
+}
+
+// ============================================
+// PRODUCT BUILDER (templates, optional)
 // ============================================
 model ProductTemplate {
   id            String   @id @default(cuid())
   shop          String
   name          String
-  category      String   // "mens" | "womens" | "other"
+  category      String // "mens" | "womens" | "other"
   defaultVendor String?
   skuPattern    String?
   createdAt     DateTime @default(now())

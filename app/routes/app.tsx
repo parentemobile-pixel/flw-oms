@@ -24,9 +24,13 @@ export default function App() {
         <Link to="/app" rel="home">
           Home
         </Link>
-        <Link to="/app/buy-planner">Buy Planner</Link>
         <Link to="/app/product-builder">Product Builder</Link>
         <Link to="/app/purchase-orders">Purchase Orders</Link>
+        <Link to="/app/adjust">Inventory Adjust</Link>
+        <Link to="/app/transfers">Transfers</Link>
+        <Link to="/app/stock-counts">Stock Counts</Link>
+        <Link to="/app/planning">Planning</Link>
+        <Link to="/app/print-labels">Print Labels</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>

@@ -17,14 +17,15 @@ import {
 
 import { authenticate } from "../shopify.server";
 import { getPurchaseOrder, receiveLineItems } from "../services/purchase-orders/po-service.server";
-import { adjustInventory, getLocations } from "../services/shopify-api/inventory.server";
+import { adjustInventory } from "../services/shopify-api/inventory.server";
+import { getLocations } from "../services/shopify-api/locations.server";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const po = await getPurchaseOrder(session.shop, params.id!);
   if (!po) throw new Response("Not found", { status: 404 });
 
-  const locations = await getLocations(admin);
+  const locations = await getLocations(admin, session.shop);
   return json({ po, locations });
 };
 
