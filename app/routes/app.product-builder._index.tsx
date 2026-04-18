@@ -54,31 +54,17 @@ import type {
 import { MENS_SIZES, WOMENS_SIZES } from "../utils/constants";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  let vendors: string[] = [];
-  let metafieldDefs: MetafieldDefinition[] = [];
-  let existingOptions: ExistingOptionValues = {};
-  let publications: Publication[] = [];
-  try {
-    vendors = await getVendors(admin);
-  } catch (error) {
-    console.error("Failed to fetch vendors:", error);
-  }
-  try {
-    metafieldDefs = await getMetafieldDefinitions(admin);
-  } catch (error) {
-    console.error("Failed to fetch metafield definitions:", error);
-  }
-  try {
-    existingOptions = await getExistingOptionValues(admin);
-  } catch (error) {
-    console.error("Failed to fetch existing options:", error);
-  }
-  try {
-    publications = await getPublications(admin);
-  } catch (error) {
-    console.error("Failed to fetch publications:", error);
-  }
+  const { admin, session } = await authenticate.admin(request);
+  // Run the 4 Shopify metadata queries in parallel, each behind the
+  // shopify-cache.server.ts TTL cache. First load hits the network; within the
+  // TTL window subsequent loads are near-instant (single SQLite read each).
+  const [vendors, metafieldDefs, existingOptions, publications] =
+    await Promise.all([
+      getVendors(admin, session.shop),
+      getMetafieldDefinitions(admin, session.shop),
+      getExistingOptionValues(admin, session.shop),
+      getPublications(admin, session.shop),
+    ]);
   return json({ vendors, metafieldDefs, existingOptions, publications });
 };
 

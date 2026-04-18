@@ -1,4 +1,10 @@
 import type { AdminApiContext } from "@shopify/shopify-app-remix/server";
+import {
+  CACHE_KEYS,
+  CACHE_TTL,
+  getCached,
+} from "../cache/shopify-cache.server";
+import { generateBarcodeForVariant } from "./barcodes.server";
 
 const PRODUCTS_QUERY = `#graphql
   query GetProducts($first: Int!, $after: String, $query: String) {
@@ -73,14 +79,32 @@ const VENDORS_QUERY = `#graphql
   }
 `;
 
-export async function getVendors(admin: AdminApiContext): Promise<string[]> {
-  try {
+export async function getVendors(
+  admin: AdminApiContext,
+  shop?: string,
+): Promise<string[]> {
+  const fetcher = async () => {
     const response = await admin.graphql(VENDORS_QUERY, {
       variables: { first: 250 },
     });
     const data = await response.json();
-    const vendors = data.data.products.edges.map((edge: { node: { vendor: string } }) => edge.node.vendor);
+    const vendors = data.data.products.edges.map(
+      (edge: { node: { vendor: string } }) => edge.node.vendor,
+    );
     return [...new Set(vendors)].filter(Boolean).sort() as string[];
+  };
+
+  // Cached path (preferred). Falls back to direct fetch if no shop given.
+  if (shop) {
+    try {
+      return await getCached(shop, CACHE_KEYS.VENDORS, CACHE_TTL.VENDORS, fetcher);
+    } catch (error) {
+      console.error("Failed to fetch vendors (cached):", error);
+      return [];
+    }
+  }
+  try {
+    return await fetcher();
   } catch (error) {
     console.error("Failed to fetch vendors:", error);
     return [];
@@ -106,13 +130,34 @@ export interface Publication {
   name: string;
 }
 
-export async function getPublications(admin: AdminApiContext): Promise<Publication[]> {
-  try {
+export async function getPublications(
+  admin: AdminApiContext,
+  shop?: string,
+): Promise<Publication[]> {
+  const fetcher = async () => {
     const response = await admin.graphql(PUBLICATIONS_QUERY, {
       variables: { first: 50 },
     });
     const data = await response.json();
-    return data.data.publications.edges.map((edge: { node: Publication }) => edge.node);
+    return data.data.publications.edges.map(
+      (edge: { node: Publication }) => edge.node,
+    );
+  };
+  if (shop) {
+    try {
+      return await getCached(
+        shop,
+        CACHE_KEYS.PUBLICATIONS,
+        CACHE_TTL.PUBLICATIONS,
+        fetcher,
+      );
+    } catch (error) {
+      console.error("Failed to fetch publications (cached):", error);
+      return [];
+    }
+  }
+  try {
+    return await fetcher();
   } catch (error) {
     console.error("Failed to fetch publications:", error);
     return [];
@@ -209,16 +254,45 @@ export interface MetafieldDefinition {
   validations: Array<{ name: string; value: string }>;
 }
 
-export async function getMetafieldDefinitions(admin: AdminApiContext): Promise<MetafieldDefinition[]> {
-  try {
+export async function getMetafieldDefinitions(
+  admin: AdminApiContext,
+  shop?: string,
+): Promise<MetafieldDefinition[]> {
+  const fetcher = async () => {
     const response = await admin.graphql(METAFIELD_DEFINITIONS_QUERY);
     const data = await response.json();
     return data.data.metafieldDefinitions.edges.map(
-      (edge: { node: { id: string; name: string; namespace: string; key: string; type: { name: string }; description: string | null; validations: Array<{ name: string; value: string }> } }) => ({
+      (edge: {
+        node: {
+          id: string;
+          name: string;
+          namespace: string;
+          key: string;
+          type: { name: string };
+          description: string | null;
+          validations: Array<{ name: string; value: string }>;
+        };
+      }) => ({
         ...edge.node,
         type: edge.node.type.name,
       }),
     );
+  };
+  if (shop) {
+    try {
+      return await getCached(
+        shop,
+        CACHE_KEYS.METAFIELD_DEFINITIONS,
+        CACHE_TTL.METAFIELD_DEFINITIONS,
+        fetcher,
+      );
+    } catch (error) {
+      console.error("Failed to fetch metafield definitions (cached):", error);
+      return [];
+    }
+  }
+  try {
+    return await fetcher();
   } catch (error) {
     console.error("Failed to fetch metafield definitions:", error);
     return [];
@@ -279,7 +353,37 @@ export interface CreateProductInput {
   metafields?: MetafieldInput[];
   imageUrl?: string;
   tags?: string[];
+  /**
+   * If true, auto-generate a deterministic FLW barcode per variant after
+   * creation. Default: true.
+   */
+  generateBarcodes?: boolean;
+  /**
+   * Optional: set initial on-hand inventory per (variant, location) after
+   * creation. Keys into the combinations produced by `generateVariantCombinations`,
+   * i.e. values are arrays aligned with active options. Skipped if undefined
+   * or empty.
+   *
+   * Shape: Record<variantOptionKey, Record<locationId, quantity>>
+   * where variantOptionKey = activeOption values joined by "/" (e.g. "M/Red").
+   */
+  initialInventory?: Record<string, Record<string, number>>;
 }
+
+const PRODUCT_VARIANTS_BULK_UPDATE_MUTATION = `#graphql
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants {
+        id
+        barcode
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
 
 // Generate all combinations of option values
 function generateVariantCombinations(options: ProductOption[]): Array<Array<{ optionName: string; name: string }>> {
@@ -357,7 +461,123 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
   });
 
   const data = await response.json();
-  return data.data.productSet;
+  const result = data.data.productSet;
+
+  // Post-create steps: generate barcodes + set initial inventory.
+  // If either fails, we log but don't fail the whole creation — the product
+  // was created successfully and the user can retry these as follow-up actions.
+  const product = result?.product;
+  const userErrors = result?.userErrors ?? [];
+  if (userErrors.length === 0 && product?.variants?.edges) {
+    const variantEdges = product.variants.edges as Array<{
+      node: {
+        id: string;
+        inventoryItem?: { id: string };
+        selectedOptions: Array<{ name: string; value: string }>;
+      };
+    }>;
+
+    // 1. Auto-generate barcodes (default on)
+    if (input.generateBarcodes !== false && variantEdges.length > 0) {
+      try {
+        const variantsPayload = variantEdges.map((edge) => ({
+          id: edge.node.id,
+          barcode: generateBarcodeForVariant(edge.node.id),
+        }));
+        await admin.graphql(PRODUCT_VARIANTS_BULK_UPDATE_MUTATION, {
+          variables: {
+            productId: product.id,
+            variants: variantsPayload,
+          },
+        });
+      } catch (error) {
+        console.error("Failed to auto-generate barcodes:", error);
+      }
+    }
+
+    // 2. Set initial inventory (if provided)
+    if (
+      input.initialInventory &&
+      Object.keys(input.initialInventory).length > 0
+    ) {
+      try {
+        // Re-fetch variants to pick up inventoryItem.id (not always returned by productSet)
+        const withInv = await getProductVariantsWithInventoryItems(
+          admin,
+          product.id,
+        );
+        const { adjustInventoryBatch } = await import("./inventory.server");
+        const changes: Array<{
+          inventoryItemId: string;
+          locationId: string;
+          delta: number;
+        }> = [];
+        for (const variant of withInv) {
+          const key = variant.selectedOptions
+            .map((o) => o.value)
+            .join("/");
+          const perLocation = input.initialInventory[key];
+          if (!perLocation) continue;
+          for (const [locationId, qty] of Object.entries(perLocation)) {
+            if (qty && qty > 0) {
+              changes.push({
+                inventoryItemId: variant.inventoryItemId,
+                locationId,
+                delta: qty,
+              });
+            }
+          }
+        }
+        if (changes.length > 0) {
+          await adjustInventoryBatch(admin, changes, "received");
+        }
+      } catch (error) {
+        console.error("Failed to set initial inventory:", error);
+      }
+    }
+  }
+
+  return result;
+}
+
+// Small helper: fetch variant inventoryItem.id for a newly-created product.
+// Used by createProduct's initial-inventory step.
+const PRODUCT_VARIANTS_WITH_INV_QUERY = `#graphql
+  query ProductVariantsWithInv($id: ID!) {
+    product(id: $id) {
+      variants(first: 100) {
+        edges {
+          node {
+            id
+            selectedOptions { name value }
+            inventoryItem { id }
+          }
+        }
+      }
+    }
+  }
+`;
+
+async function getProductVariantsWithInventoryItems(
+  admin: AdminApiContext,
+  productId: string,
+): Promise<
+  Array<{
+    id: string;
+    inventoryItemId: string;
+    selectedOptions: Array<{ name: string; value: string }>;
+  }>
+> {
+  const response = await admin.graphql(PRODUCT_VARIANTS_WITH_INV_QUERY, {
+    variables: { id: productId },
+  });
+  const data = await response.json();
+  const edges = data.data?.product?.variants?.edges ?? [];
+  return edges.map((e: any) => ({
+    id: e.node.id,
+    inventoryItemId: e.node.inventoryItem.id,
+    selectedOptions: e.node.selectedOptions,
+  }));
 }
 
 const SEARCH_PRODUCTS_QUERY = `#graphql
@@ -421,8 +641,11 @@ export interface ExistingOptionValues {
   [optionName: string]: string[];
 }
 
-export async function getExistingOptionValues(admin: AdminApiContext): Promise<ExistingOptionValues> {
-  try {
+export async function getExistingOptionValues(
+  admin: AdminApiContext,
+  shop?: string,
+): Promise<ExistingOptionValues> {
+  const fetcher = async () => {
     const response = await admin.graphql(EXISTING_OPTIONS_QUERY, {
       variables: { first: 250 },
     });
@@ -439,11 +662,26 @@ export async function getExistingOptionValues(admin: AdminApiContext): Promise<E
         }
       }
     }
-    // Sort each option's values
     for (const key of Object.keys(result)) {
       result[key].sort();
     }
     return result;
+  };
+  if (shop) {
+    try {
+      return await getCached(
+        shop,
+        CACHE_KEYS.OPTION_VALUES,
+        CACHE_TTL.OPTION_VALUES,
+        fetcher,
+      );
+    } catch (error) {
+      console.error("Failed to fetch existing option values (cached):", error);
+      return {};
+    }
+  }
+  try {
+    return await fetcher();
   } catch (error) {
     console.error("Failed to fetch existing option values:", error);
     return {};
