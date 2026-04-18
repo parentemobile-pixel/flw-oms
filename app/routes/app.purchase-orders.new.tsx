@@ -38,6 +38,12 @@ import {
   createPurchaseOrder,
   getOnOrderQuantities,
 } from "../services/purchase-orders/po-service.server";
+import {
+  getDefaultLocation,
+  getLocations,
+  type Location,
+} from "../services/shopify-api/locations.server";
+import { LocationPicker } from "../components/LocationPicker";
 
 // Types for product/variant data from Shopify
 interface ShopifyVariant {
@@ -81,20 +87,19 @@ interface SelectedVariant {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
 
-  let vendors: string[] = [];
-  let onOrderMap: Record<string, number> = {};
-  try {
-    vendors = await getVendors(admin);
-  } catch (e) {
-    console.error("Failed to fetch vendors:", e);
-  }
-  try {
-    onOrderMap = await getOnOrderQuantities(session.shop);
-  } catch (e) {
-    console.error("Failed to fetch on-order quantities:", e);
-  }
+  const [vendors, onOrderMap, locations, defaultLocation] = await Promise.all([
+    getVendors(admin, session.shop).catch(() => [] as string[]),
+    getOnOrderQuantities(session.shop).catch(() => ({})),
+    getLocations(admin, session.shop).catch(() => [] as Location[]),
+    getDefaultLocation(admin, session.shop).catch(() => null),
+  ]);
 
-  return json({ vendors, onOrderMap });
+  return json({
+    vendors,
+    onOrderMap,
+    locations,
+    defaultLocationId: defaultLocation?.id ?? null,
+  });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -120,28 +125,41 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "create") {
     const vendor = formData.get("vendor") as string;
     const notes = formData.get("notes") as string;
+    const shippingDateStr = formData.get("shippingDate") as string;
+    const expectedDateStr = formData.get("expectedDate") as string;
+    const shopifyLocationId = (formData.get("shopifyLocationId") as string) || null;
+    const poNumberExt = (formData.get("poNumberExt") as string) || null;
     const lineItemsJson = formData.get("lineItems") as string;
     const lineItems = JSON.parse(lineItemsJson) as SelectedVariant[];
 
     if (lineItems.length === 0) {
       return json({ error: "Please add at least one item to the purchase order." });
     }
+    if (lineItems.filter((li) => li.quantityOrdered > 0).length === 0) {
+      return json({ error: "All line items have zero quantity. Set qty > 0 on at least one." });
+    }
 
     try {
       const po = await createPurchaseOrder(session.shop, {
         vendor: vendor || undefined,
         notes: notes || undefined,
-        lineItems: lineItems.map((li) => ({
-          shopifyProductId: li.shopifyProductId,
-          shopifyVariantId: li.shopifyVariantId,
-          productTitle: li.productTitle,
-          variantTitle: li.variantTitle,
-          sku: li.sku || undefined,
-          barcode: li.barcode || undefined,
-          unitCost: li.unitCost,
-          retailPrice: li.retailPrice,
-          quantityOrdered: li.quantityOrdered,
-        })),
+        shippingDate: shippingDateStr ? new Date(shippingDateStr) : null,
+        expectedDate: expectedDateStr ? new Date(expectedDateStr) : null,
+        shopifyLocationId,
+        poNumberExt,
+        lineItems: lineItems
+          .filter((li) => li.quantityOrdered > 0)
+          .map((li) => ({
+            shopifyProductId: li.shopifyProductId,
+            shopifyVariantId: li.shopifyVariantId,
+            productTitle: li.productTitle,
+            variantTitle: li.variantTitle,
+            sku: li.sku || null,
+            barcode: li.barcode || null,
+            unitCost: li.unitCost,
+            retailPrice: li.retailPrice,
+            quantityOrdered: li.quantityOrdered,
+          })),
       });
 
       return redirect(`/app/purchase-orders/${po.id}`);
@@ -154,7 +172,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function NewPurchaseOrder() {
-  const { vendors, onOrderMap } = useLoaderData<typeof loader>();
+  const { vendors, onOrderMap, locations, defaultLocationId } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
@@ -164,6 +183,12 @@ export default function NewPurchaseOrder() {
   const [vendor, setVendor] = useState("");
   const [vendorInput, setVendorInput] = useState("");
   const [notes, setNotes] = useState("");
+  const [shippingDate, setShippingDate] = useState("");
+  const [expectedDate, setExpectedDate] = useState("");
+  const [poNumberExt, setPoNumberExt] = useState("");
+  const [shopifyLocationId, setShopifyLocationId] = useState<string | null>(
+    defaultLocationId,
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ShopifyProduct[]>([]);
   const [selectedItems, setSelectedItems] = useState<SelectedVariant[]>([]);
@@ -327,9 +352,22 @@ export default function NewPurchaseOrder() {
     formData.set("intent", "create");
     formData.set("vendor", vendor);
     formData.set("notes", notes);
+    formData.set("shippingDate", shippingDate);
+    formData.set("expectedDate", expectedDate);
+    formData.set("poNumberExt", poNumberExt);
+    if (shopifyLocationId) formData.set("shopifyLocationId", shopifyLocationId);
     formData.set("lineItems", JSON.stringify(selectedItems));
     submit(formData, { method: "post" });
-  }, [vendor, notes, selectedItems, submit]);
+  }, [
+    vendor,
+    notes,
+    shippingDate,
+    expectedDate,
+    poNumberExt,
+    shopifyLocationId,
+    selectedItems,
+    submit,
+  ]);
 
   const totalCost = selectedItems.reduce(
     (sum, item) => sum + item.unitCost * item.quantityOrdered,
@@ -462,14 +500,53 @@ export default function NewPurchaseOrder() {
                 </div>
                 <div style={{ flex: 1 }}>
                   <TextField
-                    label="Notes"
-                    value={notes}
-                    onChange={setNotes}
+                    label="Vendor's PO #"
+                    value={poNumberExt}
+                    onChange={setPoNumberExt}
                     autoComplete="off"
-                    multiline={2}
+                    placeholder="(optional)"
+                    helpText="If the vendor has their own PO number"
                   />
                 </div>
               </InlineStack>
+              <InlineStack gap="400" wrap={false}>
+                <div style={{ flex: 1 }}>
+                  <TextField
+                    label="Ship by"
+                    type="date"
+                    value={shippingDate}
+                    onChange={setShippingDate}
+                    autoComplete="off"
+                    helpText="When the vendor should ship this order"
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <TextField
+                    label="Expected delivery"
+                    type="date"
+                    value={expectedDate}
+                    onChange={setExpectedDate}
+                    autoComplete="off"
+                    helpText="When we expect this to arrive"
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <LocationPicker
+                    label="Receive to location"
+                    locations={locations}
+                    value={shopifyLocationId}
+                    onChange={setShopifyLocationId}
+                    persistKey="po-create-destination"
+                  />
+                </div>
+              </InlineStack>
+              <TextField
+                label="Notes"
+                value={notes}
+                onChange={setNotes}
+                autoComplete="off"
+                multiline={3}
+              />
             </BlockStack>
           </Card>
         </Layout.Section>
