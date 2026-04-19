@@ -155,6 +155,46 @@ function dateInputValue(
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// Convert a Shopify product gid to the App Bridge admin URL. Clicking
+// `shopify:admin/products/...` inside an embedded app opens the Shopify
+// admin in a new tab (or deeplinks inside the admin iframe).
+function productAdminUrl(shopifyProductId: string): string {
+  const numericId = shopifyProductId.replace("gid://shopify/Product/", "");
+  return `shopify:admin/products/${numericId}`;
+}
+
+// Styled anchor that matches the default Polaris link look. Renders an
+// external-safe link — App Bridge picks up the `shopify:` scheme.
+function ProductLink({
+  productId,
+  title,
+  nonSize,
+}: {
+  productId: string;
+  title: string;
+  nonSize?: string;
+}) {
+  return (
+    <a
+      href={productAdminUrl(productId)}
+      target="_blank"
+      rel="noreferrer"
+      style={{
+        color: "#005bd3",
+        textDecoration: "none",
+        fontWeight: 500,
+      }}
+    >
+      {title}
+      {nonSize && (
+        <span
+          style={{ color: "#616161", fontWeight: 400 }}
+        >{` — ${nonSize}`}</span>
+      )}
+    </a>
+  );
+}
+
 interface EditableLine {
   id: string;
   shopifyProductId: string;
@@ -442,7 +482,13 @@ export default function PurchaseOrderDetail() {
   );
 
   const readOnlyRows = po.lineItems.map((li) => [
-    li.productTitle,
+    (
+      <ProductLink
+        key={li.id}
+        productId={li.shopifyProductId}
+        title={li.productTitle}
+      />
+    ),
     li.variantTitle,
     li.sku || "—",
     li.barcode || "—",
@@ -525,7 +571,8 @@ export default function PurchaseOrderDetail() {
           : [
               {
                 content: "Print Labels",
-                url: `/app/purchase-orders/${po.id}/labels`,
+                url: `/api/labels/${po.id}`,
+                external: true,
               },
               {
                 content: "Download PDF (Line)",
@@ -972,7 +1019,10 @@ export default function PurchaseOrderDetail() {
                           style={{ borderBottom: "1px solid #f1f1f1" }}
                         >
                           <td style={{ padding: "8px" }}>
-                            {line.productTitle}
+                            <ProductLink
+                              productId={line.shopifyProductId}
+                              title={line.productTitle}
+                            />
                           </td>
                           <td style={{ padding: "8px" }}>
                             {line.variantTitle}
@@ -1278,6 +1328,7 @@ function PODetailGrid({
   const groups = new Map<
     string,
     {
+      productId: string;
       productTitle: string;
       nonSize: string;
       cost: number;
@@ -1294,6 +1345,7 @@ function PODetailGrid({
     const existing = groups.get(key);
     if (!existing) {
       groups.set(key, {
+        productId: li.shopifyProductId,
         productTitle: li.productTitle,
         nonSize,
         cost: li.unitCost,
@@ -1398,17 +1450,14 @@ function PODetailGrid({
                 <td
                   style={{
                     padding: "8px",
-                    fontWeight: 500,
                     verticalAlign: "top",
                   }}
                 >
-                  {g.productTitle}
-                  {g.nonSize && (
-                    <Text as="span" variant="bodySm" tone="subdued">
-                      {" "}
-                      — {g.nonSize}
-                    </Text>
-                  )}
+                  <ProductLink
+                    productId={g.productId}
+                    title={g.productTitle}
+                    nonSize={g.nonSize}
+                  />
                 </td>
                 <td
                   style={{
