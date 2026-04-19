@@ -435,6 +435,51 @@ export default function PurchaseOrderDetail() {
     submit,
   ]);
 
+  // Print labels: fetch the PDF inside the authenticated iframe context
+  // (a top-level navigation to /api/labels/:poId in a new tab loses the
+  // Shopify admin session and returns nothing). Then trigger a blob
+  // download so the user gets a file they can open + print.
+  const [isGeneratingLabels, setIsGeneratingLabels] = useState(false);
+  const handlePrintLabels = useCallback(async () => {
+    if (isGeneratingLabels) return;
+    setIsGeneratingLabels(true);
+    try {
+      const response = await fetch(`/api/labels/${po.id}`);
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `Label endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+        );
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) {
+        throw new Error(
+          "Generated PDF was empty. Check that line items have SKUs or barcodes.",
+        );
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `labels-${po.poNumber}.pdf`;
+      a.rel = "noreferrer";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke after the click+download has been handed off to the browser.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error("Print labels failed:", error);
+      // Surface the error so the user knows something went wrong.
+      window.alert(
+        `Couldn't generate labels: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setIsGeneratingLabels(false);
+    }
+  }, [isGeneratingLabels, po.id, po.poNumber]);
+
   const handleCancelEdit = useCallback(() => {
     // Reset back to PO values
     setVendor(po.vendor ?? "");
@@ -570,9 +615,12 @@ export default function PurchaseOrderDetail() {
           ? [{ content: "Cancel", onAction: handleCancelEdit }]
           : [
               {
-                content: "Print Labels",
-                url: `/api/labels/${po.id}`,
-                external: true,
+                content: isGeneratingLabels
+                  ? "Generating…"
+                  : "Print Labels",
+                onAction: handlePrintLabels,
+                loading: isGeneratingLabels,
+                disabled: isGeneratingLabels,
               },
               {
                 content: "Download PDF (Line)",
