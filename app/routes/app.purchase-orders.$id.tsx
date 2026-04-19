@@ -192,8 +192,40 @@ export default function PurchaseOrderDetail() {
   const [viewMode, setViewMode] = useState<"line" | "grid">("grid");
   const [editViewMode, setEditViewMode] = useState<"line" | "grid">("grid");
 
-  // Product search state (edit mode only). Uses a separate fetcher so the
-  // search doesn't conflict with the main form submission.
+  // Editable state (only used in edit mode; otherwise ignored)
+  const [vendor, setVendor] = useState(po.vendor ?? "");
+  const [vendorInput, setVendorInput] = useState(po.vendor ?? "");
+  const [poNumberExt, setPoNumberExt] = useState(po.poNumberExt ?? "");
+  const [shippingDate, setShippingDate] = useState(
+    dateInputValue(po.shippingDate),
+  );
+  const [expectedDate, setExpectedDate] = useState(
+    dateInputValue(po.expectedDate),
+  );
+  const [shopifyLocationId, setShopifyLocationId] = useState<string | null>(
+    po.shopifyLocationId,
+  );
+  const [notes, setNotes] = useState(po.notes ?? "");
+  const [editLines, setEditLines] = useState<EditableLine[]>(() =>
+    po.lineItems.map((li) => ({
+      id: li.id,
+      shopifyProductId: li.shopifyProductId,
+      shopifyVariantId: li.shopifyVariantId,
+      productTitle: li.productTitle,
+      variantTitle: li.variantTitle,
+      sku: li.sku,
+      barcode: li.barcode,
+      unitCost: li.unitCost,
+      retailPrice: li.retailPrice,
+      quantityOrdered: li.quantityOrdered,
+      quantityReceived: li.quantityReceived,
+    })),
+  );
+
+  // ── Product search (edit mode only) ─────────────────────────────────────
+  // Declared AFTER `vendor` + `editLines` so the useEffect deps array doesn't
+  // hit a temporal-dead-zone reference during render. Uses a separate
+  // fetcher so the search doesn't conflict with the main form submission.
   const searchFetcher = useFetcher<typeof action>();
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
@@ -225,12 +257,11 @@ export default function PurchaseOrderDetail() {
     }
   }, [searchFetcher.data]);
 
-  // Add a search hit as a new editable line. Use a synthetic id prefixed with
-  // "new-" — it never hits the DB (updatePurchaseOrder wipes and recreates
-  // all lines on save) but it keeps local state keys unique.
+  // Add a search hit as a new editable line. Synthetic "new-<variantId>-<ts>"
+  // id — never hits the DB (updatePurchaseOrder wipes and recreates all
+  // lines on save) but keeps local React keys unique.
   const handleAddFromSearch = useCallback((hit: SearchHit) => {
     setEditLines((prev) => {
-      // If the variant is already a line, just bump its quantity by 1.
       const existing = prev.find(
         (l) => l.shopifyVariantId === hit.variantId,
       );
@@ -259,36 +290,6 @@ export default function PurchaseOrderDetail() {
       ];
     });
   }, []);
-
-  // Editable state (only used in edit mode; otherwise ignored)
-  const [vendor, setVendor] = useState(po.vendor ?? "");
-  const [vendorInput, setVendorInput] = useState(po.vendor ?? "");
-  const [poNumberExt, setPoNumberExt] = useState(po.poNumberExt ?? "");
-  const [shippingDate, setShippingDate] = useState(
-    dateInputValue(po.shippingDate),
-  );
-  const [expectedDate, setExpectedDate] = useState(
-    dateInputValue(po.expectedDate),
-  );
-  const [shopifyLocationId, setShopifyLocationId] = useState<string | null>(
-    po.shopifyLocationId,
-  );
-  const [notes, setNotes] = useState(po.notes ?? "");
-  const [editLines, setEditLines] = useState<EditableLine[]>(() =>
-    po.lineItems.map((li) => ({
-      id: li.id,
-      shopifyProductId: li.shopifyProductId,
-      shopifyVariantId: li.shopifyVariantId,
-      productTitle: li.productTitle,
-      variantTitle: li.variantTitle,
-      sku: li.sku,
-      barcode: li.barcode,
-      unitCost: li.unitCost,
-      retailPrice: li.retailPrice,
-      quantityOrdered: li.quantityOrdered,
-      quantityReceived: li.quantityReceived,
-    })),
-  );
 
   // On successful save, exit edit mode. Revalidation re-fetches the PO so
   // the read-only view shows the new values.
