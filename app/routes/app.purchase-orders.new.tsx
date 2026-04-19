@@ -26,8 +26,14 @@ import {
   Divider,
   Spinner,
   Select,
+  Collapsible,
 } from "@shopify/polaris";
-import { SearchIcon, DeleteIcon } from "@shopify/polaris-icons";
+import {
+  SearchIcon,
+  DeleteIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+} from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import {
@@ -194,6 +200,7 @@ export default function NewPurchaseOrder() {
   const [selectedItems, setSelectedItems] = useState<SelectedVariant[]>([]);
   const [viewMode, setViewMode] = useState<"line" | "grid">("line");
   const [isSearching, setIsSearching] = useState(false);
+  const [productsCollapsed, setProductsCollapsed] = useState(false);
 
   // Vendor autocomplete options
   const vendorOptions = vendors
@@ -621,86 +628,147 @@ export default function NewPurchaseOrder() {
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="h2" variant="headingMd">
-                    Select Products from {vendor}
-                  </Text>
-                  {isSearching && <Spinner size="small" />}
-                </InlineStack>
-                <TextField
-                  label="Filter products"
-                  labelHidden
-                  value={searchQuery}
-                  onChange={handleSearchChange}
-                  autoComplete="off"
-                  placeholder="Type to filter products..."
-                  prefix={<Icon source={SearchIcon} />}
-                  clearButton
-                  onClearButtonClick={() => {
-                    setSearchQuery("");
-                    handleSearchChange("");
+                {/* Header — click to collapse/expand */}
+                <div
+                  onClick={() => setProductsCollapsed((v) => !v)}
+                  style={{
+                    cursor: "pointer",
+                    userSelect: "none",
                   }}
-                />
+                >
+                  <InlineStack align="space-between" blockAlign="center">
+                    <InlineStack gap="200" blockAlign="center">
+                      <Button
+                        icon={
+                          productsCollapsed
+                            ? ChevronDownIcon
+                            : ChevronUpIcon
+                        }
+                        variant="plain"
+                        accessibilityLabel={
+                          productsCollapsed
+                            ? "Expand product picker"
+                            : "Collapse product picker"
+                        }
+                        onClick={() =>
+                          setProductsCollapsed((v) => !v)
+                        }
+                      />
+                      <Text as="h2" variant="headingMd">
+                        Select Products from {vendor}
+                      </Text>
+                      {selectedItems.length > 0 && (
+                        <Badge tone="info">
+                          {`${selectedItems.length} selected`}
+                        </Badge>
+                      )}
+                      {isSearching && <Spinner size="small" />}
+                    </InlineStack>
+                    {productsCollapsed && selectedItems.length > 0 && (
+                      <Text as="span" variant="bodySm" tone="subdued">
+                        Click to show products
+                      </Text>
+                    )}
+                  </InlineStack>
+                </div>
 
-                {searchResults.length === 0 && !isSearching && (
-                  <Text as="p" tone="subdued">
-                    {searchQuery
-                      ? "No products found matching your search."
-                      : "No products found for this vendor."}
-                  </Text>
-                )}
+                <Collapsible
+                  id="po-product-picker"
+                  open={!productsCollapsed}
+                  transition={{
+                    duration: "150ms",
+                    timingFunction: "ease-in-out",
+                  }}
+                  expandOnPrint
+                >
+                  <BlockStack gap="400">
+                    <TextField
+                      label="Filter products"
+                      labelHidden
+                      value={searchQuery}
+                      onChange={handleSearchChange}
+                      autoComplete="off"
+                      placeholder="Type to filter products..."
+                      prefix={<Icon source={SearchIcon} />}
+                      clearButton
+                      onClearButtonClick={() => {
+                        setSearchQuery("");
+                        handleSearchChange("");
+                      }}
+                    />
 
-                {searchResults.map((product) => {
-                  const allVariantIds = new Set(
-                    product.variants.edges.map(({ node }) => node.id),
-                  );
-                  const selectedCount = selectedItems.filter((item) =>
-                    allVariantIds.has(item.shopifyVariantId),
-                  ).length;
-                  const allSelected = selectedCount === product.variants.edges.length;
-                  const someSelected = selectedCount > 0 && !allSelected;
+                    {searchResults.length === 0 && !isSearching && (
+                      <Text as="p" tone="subdued">
+                        {searchQuery
+                          ? "No products found matching your search."
+                          : "No products found for this vendor."}
+                      </Text>
+                    )}
 
-                  return (
-                    <Card key={product.id} padding="300">
-                      <BlockStack gap="200">
-                        <InlineStack
-                          align="space-between"
-                          blockAlign="center"
-                        >
-                          <InlineStack gap="200" blockAlign="center">
-                            <Checkbox
-                              label=""
-                              labelHidden
-                              checked={allSelected}
-                              onChange={(checked) =>
-                                handleSelectAllVariants(product, checked)
-                              }
+                    {searchResults.map((product) => {
+                      const allVariantIds = new Set(
+                        product.variants.edges.map(({ node }) => node.id),
+                      );
+                      const selectedCount = selectedItems.filter((item) =>
+                        allVariantIds.has(item.shopifyVariantId),
+                      ).length;
+                      const allSelected =
+                        selectedCount === product.variants.edges.length;
+
+                      return (
+                        <Card key={product.id} padding="300">
+                          <BlockStack gap="200">
+                            <InlineStack
+                              align="space-between"
+                              blockAlign="center"
+                            >
+                              <InlineStack gap="200" blockAlign="center">
+                                <Checkbox
+                                  label=""
+                                  labelHidden
+                                  checked={allSelected}
+                                  onChange={(checked) =>
+                                    handleSelectAllVariants(
+                                      product,
+                                      checked,
+                                    )
+                                  }
+                                />
+                                <Text
+                                  as="p"
+                                  variant="bodyMd"
+                                  fontWeight="bold"
+                                >
+                                  {product.title}
+                                </Text>
+                                {selectedCount > 0 && (
+                                  <Badge tone="info">
+                                    {`${selectedCount} selected`}
+                                  </Badge>
+                                )}
+                              </InlineStack>
+                              <Text
+                                as="p"
+                                variant="bodySm"
+                                tone="subdued"
+                              >
+                                {product.variants.edges.length} variant
+                                {product.variants.edges.length !== 1 ? "s" : ""}
+                              </Text>
+                            </InlineStack>
+
+                            <ProductVariantPicker
+                              product={product}
+                              selectedItems={selectedItems}
+                              onToggleVariant={handleToggleVariant}
+                              onToggleColorGroup={handleToggleColorGroup}
                             />
-                            <Text as="p" variant="bodyMd" fontWeight="bold">
-                              {product.title}
-                            </Text>
-                            {selectedCount > 0 && (
-                              <Badge tone="info">
-                                {selectedCount} selected
-                              </Badge>
-                            )}
-                          </InlineStack>
-                          <Text as="p" variant="bodySm" tone="subdued">
-                            {product.variants.edges.length} variant
-                            {product.variants.edges.length !== 1 ? "s" : ""}
-                          </Text>
-                        </InlineStack>
-
-                        <ProductVariantPicker
-                          product={product}
-                          selectedItems={selectedItems}
-                          onToggleVariant={handleToggleVariant}
-                          onToggleColorGroup={handleToggleColorGroup}
-                        />
-                      </BlockStack>
-                    </Card>
-                  );
-                })}
+                          </BlockStack>
+                        </Card>
+                      );
+                    })}
+                  </BlockStack>
+                </Collapsible>
               </BlockStack>
             </Card>
           </Layout.Section>
