@@ -284,33 +284,45 @@ export default function NewPurchaseOrder() {
     [onOrderMap],
   );
 
+  // Helper: build a SelectedVariant row from a Shopify variant + product
+  const toSelectedVariant = useCallback(
+    (product: ShopifyProduct, variant: ShopifyVariant): SelectedVariant => {
+      const costAmount = variant.inventoryItem?.unitCost?.amount;
+      const cost = costAmount ? parseFloat(costAmount) : 0;
+      const onOrder =
+        (onOrderMap as Record<string, number>)[variant.id] || 0;
+      return {
+        shopifyProductId: product.id,
+        shopifyVariantId: variant.id,
+        productTitle: product.title,
+        variantTitle: variant.title,
+        sku: variant.sku || "",
+        barcode: variant.barcode || "",
+        unitCost: cost,
+        retailPrice: parseFloat(variant.price) || 0,
+        quantityOrdered: 1,
+        currentStock: variant.inventoryQuantity || 0,
+        onOrder,
+        selectedOptions: variant.selectedOptions || [],
+      };
+    },
+    [onOrderMap],
+  );
+
   // Select all variants for a product
   const handleSelectAllVariants = useCallback(
     (product: ShopifyProduct, checked: boolean) => {
       if (checked) {
-        const newItems: SelectedVariant[] = [];
-        for (const { node: variant } of product.variants.edges) {
-          if (!selectedItems.some((item) => item.shopifyVariantId === variant.id)) {
-            const costAmount = variant.inventoryItem?.unitCost?.amount;
-            const cost = costAmount ? parseFloat(costAmount) : 0;
-            const onOrder = (onOrderMap as Record<string, number>)[variant.id] || 0;
-            newItems.push({
-              shopifyProductId: product.id,
-              shopifyVariantId: variant.id,
-              productTitle: product.title,
-              variantTitle: variant.title,
-              sku: variant.sku || "",
-              barcode: variant.barcode || "",
-              unitCost: cost,
-              retailPrice: parseFloat(variant.price) || 0,
-              quantityOrdered: 1,
-              currentStock: variant.inventoryQuantity || 0,
-              onOrder,
-              selectedOptions: variant.selectedOptions || [],
-            });
+        setSelectedItems((prev) => {
+          const existing = new Set(prev.map((p) => p.shopifyVariantId));
+          const additions: SelectedVariant[] = [];
+          for (const { node: variant } of product.variants.edges) {
+            if (!existing.has(variant.id)) {
+              additions.push(toSelectedVariant(product, variant));
+            }
           }
-        }
-        setSelectedItems((prev) => [...prev, ...newItems]);
+          return [...prev, ...additions];
+        });
       } else {
         const variantIds = new Set(
           product.variants.edges.map(({ node }) => node.id),
@@ -320,7 +332,36 @@ export default function NewPurchaseOrder() {
         );
       }
     },
-    [selectedItems, onOrderMap],
+    [toSelectedVariant],
+  );
+
+  // Select/deselect every variant in a "color group" (all variants sharing
+  // the same non-size option value(s)).
+  const handleToggleColorGroup = useCallback(
+    (
+      product: ShopifyProduct,
+      groupVariants: ShopifyVariant[],
+      checked: boolean,
+    ) => {
+      if (checked) {
+        setSelectedItems((prev) => {
+          const existing = new Set(prev.map((p) => p.shopifyVariantId));
+          const additions: SelectedVariant[] = [];
+          for (const variant of groupVariants) {
+            if (!existing.has(variant.id)) {
+              additions.push(toSelectedVariant(product, variant));
+            }
+          }
+          return [...prev, ...additions];
+        });
+      } else {
+        const ids = new Set(groupVariants.map((v) => v.id));
+        setSelectedItems((prev) =>
+          prev.filter((item) => !ids.has(item.shopifyVariantId)),
+        );
+      }
+    },
+    [toSelectedVariant],
   );
 
   const handleQuantityChange = useCallback((variantId: string, qty: string) => {
@@ -626,64 +667,12 @@ export default function NewPurchaseOrder() {
                           </Text>
                         </InlineStack>
 
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns:
-                              "repeat(auto-fill, minmax(200px, 1fr))",
-                            gap: "4px",
-                            paddingLeft: "28px",
-                          }}
-                        >
-                          {product.variants.edges.map(({ node: variant }) => {
-                            const isSelected = selectedItems.some(
-                              (item) => item.shopifyVariantId === variant.id,
-                            );
-                            const costAmount =
-                              variant.inventoryItem?.unitCost?.amount;
-                            const cost = costAmount
-                              ? parseFloat(costAmount)
-                              : 0;
-
-                            return (
-                              <div
-                                key={variant.id}
-                                style={{
-                                  padding: "4px 8px",
-                                  borderRadius: "6px",
-                                  background: isSelected
-                                    ? "#f0f7ff"
-                                    : "transparent",
-                                }}
-                              >
-                                <Checkbox
-                                  label={
-                                    <Text as="span" variant="bodySm">
-                                      {variant.title}{" "}
-                                      <Text
-                                        as="span"
-                                        variant="bodySm"
-                                        tone="subdued"
-                                      >
-                                        ({variant.inventoryQuantity} in stock
-                                        {cost > 0 ? `, $${cost.toFixed(2)}` : ""}
-                                        )
-                                      </Text>
-                                    </Text>
-                                  }
-                                  checked={isSelected}
-                                  onChange={(checked) =>
-                                    handleToggleVariant(
-                                      product,
-                                      variant,
-                                      checked,
-                                    )
-                                  }
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
+                        <ProductVariantPicker
+                          product={product}
+                          selectedItems={selectedItems}
+                          onToggleVariant={handleToggleVariant}
+                          onToggleColorGroup={handleToggleColorGroup}
+                        />
                       </BlockStack>
                     </Card>
                   );
@@ -761,6 +750,257 @@ export default function NewPurchaseOrder() {
         </Layout.Section>
       </Layout>
     </Page>
+  );
+}
+
+// ─── Product Variant Picker ──────────────────────────────────────────────────
+// Groups variants by their non-size option values (typically Color) so a user
+// can quickly select a whole colorway with one click. Falls back to a flat
+// checkbox grid for products that have only one option axis (or no options).
+
+const SIZE_OPTION_NAMES = new Set(["size", "sizes"]);
+const SIZE_ORDER = [
+  "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL", "OS", "ONE SIZE",
+];
+
+function compareSizes(a: string, b: string): number {
+  const ai = SIZE_ORDER.indexOf(a.toUpperCase());
+  const bi = SIZE_ORDER.indexOf(b.toUpperCase());
+  if (ai !== -1 && bi !== -1) return ai - bi;
+  if (ai !== -1) return -1;
+  if (bi !== -1) return 1;
+  return a.localeCompare(b);
+}
+
+function ProductVariantPicker({
+  product,
+  selectedItems,
+  onToggleVariant,
+  onToggleColorGroup,
+}: {
+  product: ShopifyProduct;
+  selectedItems: SelectedVariant[];
+  onToggleVariant: (
+    product: ShopifyProduct,
+    variant: ShopifyVariant,
+    checked: boolean,
+  ) => void;
+  onToggleColorGroup: (
+    product: ShopifyProduct,
+    groupVariants: ShopifyVariant[],
+    checked: boolean,
+  ) => void;
+}) {
+  const variants = product.variants.edges.map((e) => e.node);
+
+  // Detect the option axes present on these variants.
+  const optionNames = new Set<string>();
+  for (const v of variants) {
+    for (const o of v.selectedOptions ?? []) optionNames.add(o.name);
+  }
+  const hasSize = [...optionNames].some((n) =>
+    SIZE_OPTION_NAMES.has(n.toLowerCase()),
+  );
+  const hasNonSize = [...optionNames].some(
+    (n) => !SIZE_OPTION_NAMES.has(n.toLowerCase()),
+  );
+  const shouldGroup = hasSize && hasNonSize;
+
+  if (!shouldGroup) {
+    // Flat grid — product has only size, or only color, or no options at all.
+    return <FlatVariantGrid
+      product={product}
+      variants={variants}
+      selectedItems={selectedItems}
+      onToggleVariant={onToggleVariant}
+    />;
+  }
+
+  // Build groups keyed by non-size option values joined with " / ".
+  const groupMap = new Map<string, ShopifyVariant[]>();
+  for (const v of variants) {
+    const nonSize = (v.selectedOptions ?? [])
+      .filter((o) => !SIZE_OPTION_NAMES.has(o.name.toLowerCase()))
+      .map((o) => o.value);
+    const key = nonSize.join(" / ") || "(default)";
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key)!.push(v);
+  }
+
+  // Sort variants within each group by size.
+  for (const group of groupMap.values()) {
+    group.sort((a, b) => {
+      const sa = a.selectedOptions.find((o) =>
+        SIZE_OPTION_NAMES.has(o.name.toLowerCase()),
+      )?.value ?? "";
+      const sb = b.selectedOptions.find((o) =>
+        SIZE_OPTION_NAMES.has(o.name.toLowerCase()),
+      )?.value ?? "";
+      return compareSizes(sa, sb);
+    });
+  }
+
+  // Sort groups alphabetically by label for a stable order.
+  const groups = [...groupMap.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+
+  const selectedIds = new Set(selectedItems.map((s) => s.shopifyVariantId));
+
+  return (
+    <BlockStack gap="200">
+      {groups.map(([label, groupVariants]) => {
+        const totalInGroup = groupVariants.length;
+        const selectedInGroup = groupVariants.filter((v) =>
+          selectedIds.has(v.id),
+        ).length;
+        const allSelected = selectedInGroup === totalInGroup;
+
+        return (
+          <div
+            key={label}
+            style={{
+              borderRadius: "8px",
+              border: "1px solid #e1e3e5",
+              padding: "10px 12px",
+              background: selectedInGroup > 0 ? "#fafbff" : "transparent",
+            }}
+          >
+            <BlockStack gap="200">
+              <InlineStack align="space-between" blockAlign="center">
+                <InlineStack gap="200" blockAlign="center">
+                  <Checkbox
+                    label=""
+                    labelHidden
+                    checked={allSelected}
+                    onChange={(checked) =>
+                      onToggleColorGroup(product, groupVariants, checked)
+                    }
+                  />
+                  <Text as="span" variant="bodyMd" fontWeight="semibold">
+                    {label}
+                  </Text>
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    {selectedInGroup} / {totalInGroup} selected
+                  </Text>
+                </InlineStack>
+              </InlineStack>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns:
+                    "repeat(auto-fill, minmax(170px, 1fr))",
+                  gap: "4px",
+                  paddingLeft: "28px",
+                }}
+              >
+                {groupVariants.map((variant) => {
+                  const isSelected = selectedIds.has(variant.id);
+                  const costAmount = variant.inventoryItem?.unitCost?.amount;
+                  const cost = costAmount ? parseFloat(costAmount) : 0;
+                  const sizeVal =
+                    variant.selectedOptions.find((o) =>
+                      SIZE_OPTION_NAMES.has(o.name.toLowerCase()),
+                    )?.value ?? variant.title;
+
+                  return (
+                    <div
+                      key={variant.id}
+                      style={{
+                        padding: "4px 8px",
+                        borderRadius: "6px",
+                        background: isSelected ? "#f0f7ff" : "transparent",
+                      }}
+                    >
+                      <Checkbox
+                        label={
+                          <Text as="span" variant="bodySm">
+                            {sizeVal}{" "}
+                            <Text
+                              as="span"
+                              variant="bodySm"
+                              tone="subdued"
+                            >
+                              ({variant.inventoryQuantity} in stock
+                              {cost > 0 ? `, $${cost.toFixed(2)}` : ""})
+                            </Text>
+                          </Text>
+                        }
+                        checked={isSelected}
+                        onChange={(checked) =>
+                          onToggleVariant(product, variant, checked)
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </BlockStack>
+          </div>
+        );
+      })}
+    </BlockStack>
+  );
+}
+
+function FlatVariantGrid({
+  product,
+  variants,
+  selectedItems,
+  onToggleVariant,
+}: {
+  product: ShopifyProduct;
+  variants: ShopifyVariant[];
+  selectedItems: SelectedVariant[];
+  onToggleVariant: (
+    product: ShopifyProduct,
+    variant: ShopifyVariant,
+    checked: boolean,
+  ) => void;
+}) {
+  const selectedIds = new Set(selectedItems.map((s) => s.shopifyVariantId));
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+        gap: "4px",
+        paddingLeft: "28px",
+      }}
+    >
+      {variants.map((variant) => {
+        const isSelected = selectedIds.has(variant.id);
+        const costAmount = variant.inventoryItem?.unitCost?.amount;
+        const cost = costAmount ? parseFloat(costAmount) : 0;
+        return (
+          <div
+            key={variant.id}
+            style={{
+              padding: "4px 8px",
+              borderRadius: "6px",
+              background: isSelected ? "#f0f7ff" : "transparent",
+            }}
+          >
+            <Checkbox
+              label={
+                <Text as="span" variant="bodySm">
+                  {variant.title}{" "}
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    ({variant.inventoryQuantity} in stock
+                    {cost > 0 ? `, $${cost.toFixed(2)}` : ""})
+                  </Text>
+                </Text>
+              }
+              checked={isSelected}
+              onChange={(checked) =>
+                onToggleVariant(product, variant, checked)
+              }
+            />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
