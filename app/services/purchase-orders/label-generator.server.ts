@@ -64,13 +64,13 @@ export async function generateLabelsPDF(
       }
       isFirstPage = false;
 
-      // ── Top-right: Price (16pt bold) ──
+      // ── Top-right: Price (13pt bold — reduced from 16pt) ──
       let priceWidth = 0;
       if (priceStr) {
-        doc.setFontSize(16);
+        doc.setFontSize(13);
         doc.setFont("helvetica", "bold");
         priceWidth = doc.getTextWidth(priceStr);
-        doc.text(priceStr, rightEdge, 0.2, { align: "right" });
+        doc.text(priceStr, rightEdge, 0.18, { align: "right" });
       }
 
       // ── Top-left: Variant (9pt bold) — the thing a stocker looks at ──
@@ -138,7 +138,7 @@ export async function generateLabelsPDF(
         doc.text(barcodeText, labelWidth / 2, skuY, { align: "center" });
       }
 
-      // ── Bottom: Product Title (full width, truncates only if needed) ──
+      // ── Bottom: Product Title (centered, full width minus margins) ──
       doc.setFontSize(7);
       doc.setFont("helvetica", "normal");
       const fittedTitle = fitText(
@@ -146,7 +146,7 @@ export async function generateLabelsPDF(
         item.productTitle,
         labelWidth - 2 * margin,
       );
-      doc.text(fittedTitle, margin, 0.95);
+      doc.text(fittedTitle, labelWidth / 2, 0.95, { align: "center" });
     }
   }
 
