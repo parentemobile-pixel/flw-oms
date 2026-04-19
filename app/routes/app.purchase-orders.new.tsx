@@ -198,7 +198,7 @@ export default function NewPurchaseOrder() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ShopifyProduct[]>([]);
   const [selectedItems, setSelectedItems] = useState<SelectedVariant[]>([]);
-  const [viewMode, setViewMode] = useState<"line" | "grid">("line");
+  const [viewMode, setViewMode] = useState<"line" | "grid">("grid");
   const [isSearching, setIsSearching] = useState(false);
   const [productsCollapsed, setProductsCollapsed] = useState(false);
 
@@ -390,6 +390,23 @@ export default function NewPurchaseOrder() {
       ),
     );
   }, []);
+
+  // Update cost for many variants at once — used by the grid view where one
+  // "row" represents a colorway and cost is typically shared across sizes.
+  const handleRowCostChange = useCallback(
+    (variantIds: string[], cost: string) => {
+      const nextCost = parseFloat(cost) || 0;
+      const ids = new Set(variantIds);
+      setSelectedItems((prev) =>
+        prev.map((item) =>
+          ids.has(item.shopifyVariantId)
+            ? { ...item, unitCost: nextCost }
+            : item,
+        ),
+      );
+    },
+    [],
+  );
 
   const handleRemoveItem = useCallback((variantId: string) => {
     setSelectedItems((prev) => prev.filter((item) => item.shopifyVariantId !== variantId));
@@ -814,6 +831,7 @@ export default function NewPurchaseOrder() {
                     <GridView
                       gridData={gridData}
                       onQuantityChange={handleQuantityChange}
+                      onRowCostChange={handleRowCostChange}
                     />
                   )
                 )}
@@ -1135,8 +1153,26 @@ function LineItemView({
               <td style={{ padding: "8px" }}>{item.productTitle}</td>
               <td style={{ padding: "8px" }}>{item.variantTitle}</td>
               <td style={{ padding: "8px" }}>{item.sku || "—"}</td>
-              <td style={{ padding: "8px", textAlign: "right" }}>
-                ${item.unitCost.toFixed(2)}
+              <td
+                style={{
+                  padding: "2px 4px",
+                  textAlign: "right",
+                  minWidth: "90px",
+                }}
+              >
+                <TextField
+                  label="Cost"
+                  labelHidden
+                  type="number"
+                  prefix="$"
+                  value={String(item.unitCost)}
+                  onChange={(val) =>
+                    onCostChange(item.shopifyVariantId, val)
+                  }
+                  min={0}
+                  step={0.01}
+                  autoComplete="off"
+                />
               </td>
               <td style={{ padding: "8px", textAlign: "right" }}>
                 ${item.retailPrice.toFixed(2)}
@@ -1185,6 +1221,7 @@ function LineItemView({
 function GridView({
   gridData,
   onQuantityChange,
+  onRowCostChange,
 }: {
   gridData: {
     productGroups: Record<
@@ -1207,6 +1244,7 @@ function GridView({
     sortedSizes: string[];
   };
   onQuantityChange: (id: string, qty: string) => void;
+  onRowCostChange: (variantIds: string[], cost: string) => void;
 }) {
   const { productGroups, sortedSizes } = gridData;
   const sizeColCount = Math.max(sortedSizes.length, 1);
@@ -1329,8 +1367,32 @@ function GridView({
                       </div>
                     )}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "right", verticalAlign: "top" }}>
-                    ${row.cost.toFixed(2)}
+                  <td
+                    style={{
+                      padding: "2px 4px",
+                      textAlign: "right",
+                      verticalAlign: "top",
+                      minWidth: "90px",
+                    }}
+                  >
+                    <TextField
+                      label="Cost"
+                      labelHidden
+                      type="number"
+                      prefix="$"
+                      value={String(row.cost)}
+                      onChange={(val) =>
+                        onRowCostChange(
+                          Object.values(row.bySize).map(
+                            (v) => v.shopifyVariantId,
+                          ),
+                          val,
+                        )
+                      }
+                      min={0}
+                      step={0.01}
+                      autoComplete="off"
+                    />
                   </td>
                   <td style={{ padding: "8px", textAlign: "right", verticalAlign: "top" }}>
                     ${row.retail.toFixed(2)}
