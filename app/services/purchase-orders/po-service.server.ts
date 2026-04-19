@@ -182,6 +182,17 @@ export async function getPurchaseOrderByToken(token: string) {
   });
 }
 
+/**
+ * Edit an existing PO.
+ *
+ * Rules:
+ *  - Cancelled POs cannot be edited.
+ *  - Metadata fields (vendor, poNumberExt, shippingDate, expectedDate,
+ *    shopifyLocationId, notes) are editable on any non-cancelled PO.
+ *  - Line items can only be replaced on DRAFT POs. Once a PO is ordered,
+ *    line items are locked (they've been sent to the vendor, and partial
+ *    receive state on them must be preserved).
+ */
 export async function updatePurchaseOrder(
   shop: string,
   id: string,
@@ -189,11 +200,16 @@ export async function updatePurchaseOrder(
 ) {
   const po = await db.purchaseOrder.findFirst({ where: { shop, id } });
   if (!po) throw new Error("PO not found");
-  if (po.status !== "draft") {
-    throw new Error("Only draft POs can be edited");
+  if (po.status === "cancelled") {
+    throw new Error("Cancelled POs cannot be edited");
+  }
+  if (data.lineItems && po.status !== "draft") {
+    throw new Error(
+      "Line items are locked on non-draft POs — only metadata (dates, notes, vendor PO #, destination) can be edited",
+    );
   }
 
-  // If replacing line items, recompute totalCost and wipe + recreate them.
+  // If replacing line items (draft only), recompute totalCost, wipe and recreate.
   let totalCost = po.totalCost;
   if (data.lineItems) {
     totalCost = data.lineItems.reduce(
