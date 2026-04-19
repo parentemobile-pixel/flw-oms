@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import {
   useActionData,
+  useFetcher,
   useLoaderData,
   useNavigation,
   useSubmit,
@@ -23,6 +24,7 @@ import {
   Autocomplete,
   Icon,
   Banner,
+  Spinner,
 } from "@shopify/polaris";
 import { SearchIcon, DeleteIcon } from "@shopify/polaris-icons";
 
@@ -37,7 +39,11 @@ import {
   getLocations,
   type Location,
 } from "../services/shopify-api/locations.server";
-import { getVendors } from "../services/shopify-api/products.server";
+import {
+  getVendors,
+  searchProducts,
+  searchProductsByVendor,
+} from "../services/shopify-api/products.server";
 import { LocationPicker } from "../components/LocationPicker";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
 
@@ -57,9 +63,40 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  if (intent === "search") {
+    const query = String(formData.get("query") ?? "").trim();
+    const vendor = String(formData.get("vendor") ?? "").trim();
+    if (!query && !vendor) return json({ hits: [] as SearchHit[] });
+    try {
+      const result = vendor
+        ? await searchProductsByVendor(admin, vendor, query || undefined)
+        : await searchProducts(admin, query);
+      const hits: SearchHit[] = [];
+      for (const edge of result.edges as Array<{ node: any }>) {
+        const p = edge.node;
+        for (const v of p.variants.edges as Array<{ node: any }>) {
+          const costAmount = v.node.inventoryItem?.unitCost?.amount;
+          hits.push({
+            variantId: v.node.id,
+            productId: p.id,
+            productTitle: p.title,
+            variantTitle: v.node.title,
+            sku: v.node.sku ?? null,
+            barcode: v.node.barcode ?? null,
+            unitCost: costAmount ? parseFloat(costAmount) : 0,
+            retailPrice: v.node.price ? parseFloat(v.node.price) : 0,
+          });
+        }
+      }
+      return json({ hits });
+    } catch (error) {
+      return json({ hits: [] as SearchHit[], error: String(error) });
+    }
+  }
 
   if (intent === "updateStatus") {
     const status = formData.get("status") as string;
@@ -132,6 +169,17 @@ interface EditableLine {
   quantityReceived: number;
 }
 
+interface SearchHit {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  barcode: string | null;
+  unitCost: number;
+  retailPrice: number;
+}
+
 export default function PurchaseOrderDetail() {
   const { po, locations, locationName, vendors } =
     useLoaderData<typeof loader>();
@@ -142,6 +190,75 @@ export default function PurchaseOrderDetail() {
 
   const [isEditing, setIsEditing] = useState(false);
   const [viewMode, setViewMode] = useState<"line" | "grid">("grid");
+  const [editViewMode, setEditViewMode] = useState<"line" | "grid">("grid");
+
+  // Product search state (edit mode only). Uses a separate fetcher so the
+  // search doesn't conflict with the main form submission.
+  const searchFetcher = useFetcher<typeof action>();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
+  const isSearching = searchFetcher.state === "submitting";
+
+  // Debounced search: wait 300ms after typing stops, then POST the query.
+  useEffect(() => {
+    if (!isEditing) return;
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      const fd = new FormData();
+      fd.set("intent", "search");
+      fd.set("query", searchQuery);
+      // Limit to this PO's vendor by default to match the create flow.
+      if (vendor) fd.set("vendor", vendor);
+      searchFetcher.submit(fd, { method: "post" });
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, isEditing, vendor]);
+
+  useEffect(() => {
+    const data = searchFetcher.data;
+    if (data && "hits" in data) {
+      setSearchResults((data.hits as SearchHit[]) ?? []);
+    }
+  }, [searchFetcher.data]);
+
+  // Add a search hit as a new editable line. Use a synthetic id prefixed with
+  // "new-" — it never hits the DB (updatePurchaseOrder wipes and recreates
+  // all lines on save) but it keeps local state keys unique.
+  const handleAddFromSearch = useCallback((hit: SearchHit) => {
+    setEditLines((prev) => {
+      // If the variant is already a line, just bump its quantity by 1.
+      const existing = prev.find(
+        (l) => l.shopifyVariantId === hit.variantId,
+      );
+      if (existing) {
+        return prev.map((l) =>
+          l.shopifyVariantId === hit.variantId
+            ? { ...l, quantityOrdered: l.quantityOrdered + 1 }
+            : l,
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: `new-${hit.variantId}-${Date.now()}`,
+          shopifyProductId: hit.productId,
+          shopifyVariantId: hit.variantId,
+          productTitle: hit.productTitle,
+          variantTitle: hit.variantTitle,
+          sku: hit.sku,
+          barcode: hit.barcode,
+          unitCost: hit.unitCost,
+          retailPrice: hit.retailPrice,
+          quantityOrdered: 1,
+          quantityReceived: 0,
+        },
+      ];
+    });
+  }, []);
 
   // Editable state (only used in edit mode; otherwise ignored)
   const [vendor, setVendor] = useState(po.vendor ?? "");
@@ -631,14 +748,170 @@ export default function PurchaseOrderDetail() {
           )}
         </Layout.Section>
 
+        {/* Add products — only in edit mode on drafts */}
+        {isEditing && canEditLines && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="300">
+                <Text as="h2" variant="headingMd">
+                  Add products
+                </Text>
+                <TextField
+                  label={
+                    vendor
+                      ? `Search ${vendor}'s products`
+                      : "Search all products"
+                  }
+                  labelHidden
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  placeholder={
+                    vendor
+                      ? `Search ${vendor}'s products by title or SKU…`
+                      : "Search by title, SKU, or vendor…"
+                  }
+                  autoComplete="off"
+                  prefix={<Icon source={SearchIcon} />}
+                  clearButton
+                  onClearButtonClick={() => {
+                    setSearchQuery("");
+                    setSearchResults([]);
+                  }}
+                />
+                {isSearching && (
+                  <InlineStack gap="200" blockAlign="center">
+                    <Spinner size="small" />
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      Searching…
+                    </Text>
+                  </InlineStack>
+                )}
+                {searchResults.length > 0 && (
+                  <BlockStack gap="100">
+                    {searchResults.map((h) => {
+                      const alreadyAdded = editLines.some(
+                        (l) => l.shopifyVariantId === h.variantId,
+                      );
+                      return (
+                        <div
+                          key={h.variantId}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: "6px",
+                            border: "1px solid #e1e3e5",
+                          }}
+                        >
+                          <InlineStack
+                            align="space-between"
+                            blockAlign="center"
+                            wrap={false}
+                          >
+                            <div style={{ minWidth: 0 }}>
+                              <Text as="p" variant="bodyMd">
+                                {h.productTitle} —{" "}
+                                <Text as="span" tone="subdued">
+                                  {h.variantTitle}
+                                </Text>
+                              </Text>
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                {h.sku || "no SKU"}
+                                {h.unitCost > 0
+                                  ? ` · cost $${h.unitCost.toFixed(2)}`
+                                  : ""}
+                                {h.retailPrice > 0
+                                  ? ` · retail $${h.retailPrice.toFixed(2)}`
+                                  : ""}
+                              </Text>
+                            </div>
+                            <Button
+                              size="slim"
+                              onClick={() => handleAddFromSearch(h)}
+                            >
+                              {alreadyAdded ? "+1 more" : "Add"}
+                            </Button>
+                          </InlineStack>
+                        </div>
+                      );
+                    })}
+                  </BlockStack>
+                )}
+                {!isSearching &&
+                  searchQuery.trim() &&
+                  searchResults.length === 0 && (
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      No variants match "{searchQuery}".
+                    </Text>
+                  )}
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
         {/* Line items — editable on drafts when editing, otherwise DataTable */}
         <Layout.Section>
           {isEditing && canEditLines ? (
             <Card>
               <BlockStack gap="400">
-                <Text as="h2" variant="headingMd">
-                  Line items
-                </Text>
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="h2" variant="headingMd">
+                    Line items
+                  </Text>
+                  <ButtonGroup variant="segmented">
+                    <Button
+                      pressed={editViewMode === "line"}
+                      onClick={() => setEditViewMode("line")}
+                      size="slim"
+                    >
+                      Line Items
+                    </Button>
+                    <Button
+                      pressed={editViewMode === "grid"}
+                      onClick={() => setEditViewMode("grid")}
+                      size="slim"
+                    >
+                      Size Grid
+                    </Button>
+                  </ButtonGroup>
+                </InlineStack>
+                {editViewMode === "grid" ? (
+                  <PODetailGrid
+                    lineItems={editLines}
+                    editable
+                    onCellQtyChange={(lineItemId, qty) =>
+                      setEditLines((prev) =>
+                        prev.map((l) =>
+                          l.id === lineItemId
+                            ? {
+                                ...l,
+                                quantityOrdered: Math.max(0, qty),
+                              }
+                            : l,
+                        ),
+                      )
+                    }
+                    onRowCostChange={(lineItemIds, cost) => {
+                      const ids = new Set(lineItemIds);
+                      setEditLines((prev) =>
+                        prev.map((l) =>
+                          ids.has(l.id) ? { ...l, unitCost: cost } : l,
+                        ),
+                      );
+                    }}
+                    onRowRetailChange={(lineItemIds, retail) => {
+                      const ids = new Set(lineItemIds);
+                      setEditLines((prev) =>
+                        prev.map((l) =>
+                          ids.has(l.id) ? { ...l, retailPrice: retail } : l,
+                        ),
+                      );
+                    }}
+                    onRemoveLine={(lineItemId) =>
+                      setEditLines((prev) =>
+                        prev.filter((l) => l.id !== lineItemId),
+                      )
+                    }
+                  />
+                ) : (
                 <div style={{ overflowX: "auto" }}>
                   <table
                     style={{
@@ -810,9 +1083,10 @@ export default function PurchaseOrderDetail() {
                     </tbody>
                   </table>
                 </div>
+                )}
                 <Text as="p" variant="bodySm" tone="subdued">
-                  To add new line items, create a new PO. Editing preserves
-                  each line's identity and variant mapping.
+                  Use the &ldquo;Add products&rdquo; panel above to search and
+                  add more variants. Removed lines are deleted on save.
                 </Text>
               </BlockStack>
             </Card>
@@ -964,23 +1238,41 @@ function compareSizesForDetail(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
+interface PODetailLine {
+  id: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  unitCost: number;
+  retailPrice: number;
+  quantityOrdered: number;
+  quantityReceived: number;
+  shopifyProductId: string;
+}
+
+interface PODetailCell {
+  lineItemId: string;
+  ordered: number;
+  received: number;
+}
+
 function PODetailGrid({
   lineItems,
+  editable = false,
+  onCellQtyChange,
+  onRowCostChange,
+  onRowRetailChange,
+  onRemoveLine,
 }: {
-  lineItems: Array<{
-    id: string;
-    productTitle: string;
-    variantTitle: string;
-    sku: string | null;
-    unitCost: number;
-    retailPrice: number;
-    quantityOrdered: number;
-    quantityReceived: number;
-    shopifyProductId: string;
-  }>;
+  lineItems: PODetailLine[];
+  editable?: boolean;
+  onCellQtyChange?: (lineItemId: string, qty: number) => void;
+  onRowCostChange?: (lineItemIds: string[], cost: number) => void;
+  onRowRetailChange?: (lineItemIds: string[], retail: number) => void;
+  onRemoveLine?: (lineItemId: string) => void;
 }) {
-  // Group line items by (productId + nonSize label). Gather all distinct
-  // sizes across the whole PO to form columns.
+  // Group line items by (productId + nonSize label). Track lineItemId per cell
+  // so edit callbacks know which line to mutate.
   const sizeSet = new Set<string>();
   const groups = new Map<
     string,
@@ -990,13 +1282,8 @@ function PODetailGrid({
       cost: number;
       retail: number;
       noSize: boolean;
-      bySize: Record<
-        string,
-        {
-          ordered: number;
-          received: number;
-        }
-      >;
+      bySize: Record<string, PODetailCell>;
+      lineItemIds: string[]; // all lines in this row (for row-level edits)
     }
   >();
 
@@ -1012,20 +1299,21 @@ function PODetailGrid({
         retail: li.retailPrice,
         noSize: !size,
         bySize: {},
+        lineItemIds: [],
       });
     }
     const group = groups.get(key)!;
+    group.lineItemIds.push(li.id);
+    const cell: PODetailCell = {
+      lineItemId: li.id,
+      ordered: li.quantityOrdered,
+      received: li.quantityReceived,
+    };
     if (size) {
       sizeSet.add(size);
-      group.bySize[size] = {
-        ordered: li.quantityOrdered,
-        received: li.quantityReceived,
-      };
+      group.bySize[size] = cell;
     } else {
-      group.bySize["_single"] = {
-        ordered: li.quantityOrdered,
-        received: li.quantityReceived,
-      };
+      group.bySize["_single"] = cell;
     }
   }
 
@@ -1054,8 +1342,24 @@ function PODetailGrid({
             <th style={{ padding: "8px", textAlign: "left" }}>
               Product / Variant
             </th>
-            <th style={{ padding: "8px", textAlign: "right" }}>Cost</th>
-            <th style={{ padding: "8px", textAlign: "right" }}>Retail</th>
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "right",
+                minWidth: editable ? "100px" : undefined,
+              }}
+            >
+              Cost
+            </th>
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "right",
+                minWidth: editable ? "100px" : undefined,
+              }}
+            >
+              Retail
+            </th>
             {sortedSizes.length > 0 ? (
               sortedSizes.map((size) => (
                 <th
@@ -1063,7 +1367,7 @@ function PODetailGrid({
                   style={{
                     padding: "8px",
                     textAlign: "center",
-                    minWidth: "70px",
+                    minWidth: editable ? "80px" : "70px",
                   }}
                 >
                   {size}
@@ -1073,6 +1377,9 @@ function PODetailGrid({
               <th style={{ padding: "8px", textAlign: "center" }}>Qty</th>
             )}
             <th style={{ padding: "8px", textAlign: "right" }}>Row Total</th>
+            {editable && onRemoveLine && (
+              <th style={{ padding: "8px", width: "40px" }}></th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -1104,28 +1411,63 @@ function PODetailGrid({
                 </td>
                 <td
                   style={{
-                    padding: "8px",
+                    padding: editable ? "2px 4px" : "8px",
                     textAlign: "right",
                     verticalAlign: "top",
                   }}
                 >
-                  ${g.cost.toFixed(2)}
+                  {editable && onRowCostChange ? (
+                    <TextField
+                      label="Cost"
+                      labelHidden
+                      type="number"
+                      prefix="$"
+                      value={String(g.cost)}
+                      onChange={(val) =>
+                        onRowCostChange(g.lineItemIds, parseFloat(val) || 0)
+                      }
+                      min={0}
+                      step={0.01}
+                      autoComplete="off"
+                    />
+                  ) : (
+                    `$${g.cost.toFixed(2)}`
+                  )}
                 </td>
                 <td
                   style={{
-                    padding: "8px",
+                    padding: editable ? "2px 4px" : "8px",
                     textAlign: "right",
                     verticalAlign: "top",
                   }}
                 >
-                  ${g.retail.toFixed(2)}
+                  {editable && onRowRetailChange ? (
+                    <TextField
+                      label="Retail"
+                      labelHidden
+                      type="number"
+                      prefix="$"
+                      value={String(g.retail)}
+                      onChange={(val) =>
+                        onRowRetailChange(
+                          g.lineItemIds,
+                          parseFloat(val) || 0,
+                        )
+                      }
+                      min={0}
+                      step={0.01}
+                      autoComplete="off"
+                    />
+                  ) : (
+                    `$${g.retail.toFixed(2)}`
+                  )}
                 </td>
 
                 {g.noSize ? (
                   <td
                     colSpan={sizeColCount}
                     style={{
-                      padding: "8px",
+                      padding: editable ? "2px 4px" : "8px",
                       textAlign: "center",
                       verticalAlign: "top",
                     }}
@@ -1133,6 +1475,45 @@ function PODetailGrid({
                     {(() => {
                       const cell = g.bySize["_single"];
                       if (!cell) return "—";
+                      if (editable && onCellQtyChange) {
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "12px",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <div style={{ maxWidth: "120px" }}>
+                              <TextField
+                                label="Qty"
+                                labelHidden
+                                type="number"
+                                value={String(cell.ordered)}
+                                onChange={(val) =>
+                                  onCellQtyChange(
+                                    cell.lineItemId,
+                                    parseInt(val, 10) || 0,
+                                  )
+                                }
+                                min={0}
+                                autoComplete="off"
+                              />
+                            </div>
+                            {cell.received > 0 && (
+                              <div
+                                style={{
+                                  fontSize: "11px",
+                                  color: "#6b7280",
+                                }}
+                              >
+                                {cell.received} received
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
                       return (
                         <>
                           {cell.ordered}
@@ -1171,6 +1552,46 @@ function PODetailGrid({
                     const isComplete = cell.received >= cell.ordered;
                     const isPartial =
                       cell.received > 0 && cell.received < cell.ordered;
+
+                    if (editable && onCellQtyChange) {
+                      return (
+                        <td
+                          key={size}
+                          style={{
+                            padding: "2px 4px",
+                            verticalAlign: "top",
+                          }}
+                        >
+                          <TextField
+                            label="Qty"
+                            labelHidden
+                            type="number"
+                            value={String(cell.ordered)}
+                            onChange={(val) =>
+                              onCellQtyChange(
+                                cell.lineItemId,
+                                parseInt(val, 10) || 0,
+                              )
+                            }
+                            min={0}
+                            autoComplete="off"
+                          />
+                          {cell.received > 0 && (
+                            <div
+                              style={{
+                                fontSize: "11px",
+                                color: "#6b7280",
+                                textAlign: "center",
+                                marginTop: "2px",
+                              }}
+                            >
+                              {cell.received} received
+                            </div>
+                          )}
+                        </td>
+                      );
+                    }
+
                     return (
                       <td
                         key={size}
@@ -1210,6 +1631,19 @@ function PODetailGrid({
                     {rowTotal} unit{rowTotal !== 1 ? "s" : ""}
                   </div>
                 </td>
+                {editable && onRemoveLine && (
+                  <td style={{ padding: "8px", verticalAlign: "top" }}>
+                    <Button
+                      icon={DeleteIcon}
+                      variant="plain"
+                      tone="critical"
+                      accessibilityLabel="Remove row"
+                      onClick={() => {
+                        for (const lid of g.lineItemIds) onRemoveLine(lid);
+                      }}
+                    />
+                  </td>
+                )}
               </tr>
             );
           })}
