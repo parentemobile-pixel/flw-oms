@@ -18,6 +18,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const variantTitle = String(formData.get("variantTitle") ?? "");
   const sku = (formData.get("sku") as string) || null;
   const barcode = (formData.get("barcode") as string) || null;
+  const priceRaw = (formData.get("price") as string) || "";
+  const price = priceRaw ? parseFloat(priceRaw) || null : null;
   const quantity = Math.max(
     1,
     Math.min(500, parseInt(String(formData.get("quantity") ?? "1"), 10) || 1),
@@ -33,6 +35,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       variantTitle,
       sku,
       barcode,
+      price,
       quantityOrdered: quantity,
     },
   ]);

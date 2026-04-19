@@ -14,6 +14,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       variantTitle: li.variantTitle,
       sku: li.sku,
       barcode: li.barcode,
+      price: li.retailPrice || null,
       quantityOrdered: li.quantityOrdered,
     })),
   );

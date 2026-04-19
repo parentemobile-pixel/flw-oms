@@ -31,6 +31,7 @@ interface VariantHit {
   variantTitle: string;
   sku: string | null;
   barcode: string | null;
+  price: number | null;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -51,12 +52,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     for (const edge of result.edges as Array<{ node: any }>) {
       const product = edge.node;
       for (const vEdge of product.variants.edges as Array<{ node: any }>) {
+        const priceStr = vEdge.node.price;
         variants.push({
           variantId: vEdge.node.id,
           productTitle: product.title,
           variantTitle: vEdge.node.title,
           sku: vEdge.node.sku ?? null,
           barcode: vEdge.node.barcode ?? null,
+          price: priceStr ? parseFloat(priceStr) || null : null,
         });
       }
     }
@@ -98,31 +101,60 @@ export default function PrintLabels() {
     }
   }, [actionData]);
 
-  const handlePrint = useCallback(() => {
-    if (!selected) return;
-    const qty = Math.max(1, Math.min(500, parseInt(quantity, 10) || 1));
+  const [isGenerating, setIsGenerating] = useState(false);
+  const handlePrint = useCallback(async () => {
+    if (!selected || isGenerating) return;
+    const qty = Math.max(
+      1,
+      Math.min(500, parseInt(quantity, 10) || 1),
+    );
     const fd = new FormData();
     fd.set("quantity", String(qty));
     fd.set("productTitle", selected.productTitle);
     fd.set("variantTitle", selected.variantTitle);
     fd.set("sku", selected.sku ?? "");
     fd.set("barcode", selected.barcode ?? "");
-    // Use a native form submit so the browser handles the PDF download.
-    const form = document.createElement("form");
-    form.method = "post";
-    form.action = "/api/labels/adhoc";
-    form.target = "_blank";
-    for (const [k, v] of fd.entries()) {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = k;
-      input.value = String(v);
-      form.appendChild(input);
+    if (selected.price != null) fd.set("price", String(selected.price));
+
+    // Fetch inside the authenticated iframe (target=_blank would lose the
+    // Shopify admin session token), then trigger a blob download.
+    setIsGenerating(true);
+    try {
+      const response = await fetch("/api/labels/adhoc", {
+        method: "POST",
+        body: fd,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `Label endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+        );
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) {
+        throw new Error("Generated PDF was empty.");
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeSku =
+        (selected.sku ?? "labels").replace(/[^a-zA-Z0-9-_]/g, "_") || "labels";
+      a.download = `labels-${safeSku}-${qty}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error("Print labels failed:", error);
+      window.alert(
+        `Couldn't generate labels: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setIsGenerating(false);
     }
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
-  }, [selected, quantity]);
+  }, [selected, quantity, isGenerating]);
 
   return (
     <Page
@@ -233,6 +265,12 @@ export default function PrintLabels() {
                     <br />
                     SKU: {selected.sku ?? "—"} · Barcode:{" "}
                     {selected.barcode ?? "(will use SKU)"}
+                    {selected.price != null && (
+                      <>
+                        {" "}
+                        · Price: ${selected.price.toFixed(2)}
+                      </>
+                    )}
                   </Text>
                 </Banner>
                 <InlineStack gap="300" blockAlign="end">
@@ -247,13 +285,18 @@ export default function PrintLabels() {
                       autoComplete="off"
                     />
                   </div>
-                  <Button variant="primary" onClick={handlePrint}>
-                    Generate label PDF
+                  <Button
+                    variant="primary"
+                    onClick={handlePrint}
+                    loading={isGenerating}
+                    disabled={isGenerating}
+                  >
+                    {isGenerating ? "Generating…" : "Generate label PDF"}
                   </Button>
                 </InlineStack>
                 <Text as="p" variant="bodySm" tone="subdued">
-                  PDF opens in a new tab. Use your browser's print dialog to
-                  send to the Zebra printer. Label size: 2.25" × 1.25".
+                  PDF downloads to your browser. Open and print to your
+                  Zebra printer. Label size: 2" × 1" (landscape).
                 </Text>
               </BlockStack>
             </Card>

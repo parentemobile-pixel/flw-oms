@@ -59,7 +59,7 @@ export default function PrintLabels() {
       <Layout>
         <Layout.Section>
           <Banner tone="info">
-            This will generate {totalLabels} thermal labels (2.25" x 1.25") — one per unit ordered.
+            This will generate {totalLabels} thermal labels (2" x 1" landscape) — one per unit ordered.
             Print using your Dymo or Zebra thermal printer.
           </Banner>
         </Layout.Section>
