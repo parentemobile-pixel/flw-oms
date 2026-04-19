@@ -29,6 +29,7 @@ import {
 import {
   adjustInventoryBatch,
   getVariantsInventory,
+  updateInventoryItemCostsBatch,
 } from "../services/shopify-api/inventory.server";
 import {
   getLocations,
@@ -72,6 +73,15 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   if (!locationId) {
     return json({ error: "Please select a receive location." });
   }
+
+  // Fetch the PO line items up front so we know each line's unitCost —
+  // we'll push those into Shopify's inventoryItem.cost after a successful
+  // receive so COGS stays in sync with what we actually paid.
+  const po = await getPurchaseOrder(session.shop, params.id!);
+  if (!po) return json({ error: "PO not found" });
+  const costByLineItemId = new Map<string, number>(
+    po.lineItems.map((li) => [li.id, li.unitCost]),
+  );
 
   // Compute deltas (positive = more being received). Skip lines with no change.
   const withDeltas = receivedItems
@@ -164,6 +174,34 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     return json({
       error: `Shopify adjustment failed, no PO state changed: ${String(error)}`,
     });
+  }
+
+  // 3b. Push unit costs (COGS) to Shopify so margin reports and accounting
+  // stay in sync with what we actually paid. Only updates lines whose PO
+  // cost is > 0 and differs from what we already have. Failures here don't
+  // fail the whole receive — inventory is already adjusted, DB still updates.
+  const costUpdates: Array<{ inventoryItemId: string; cost: number }> = [];
+  for (const c of changes) {
+    const cost = costByLineItemId.get(c.lineItemId) ?? 0;
+    if (cost > 0) {
+      costUpdates.push({ inventoryItemId: c.inventoryItemId, cost });
+    }
+  }
+  let costResult: Awaited<
+    ReturnType<typeof updateInventoryItemCostsBatch>
+  > | null = null;
+  if (costUpdates.length > 0) {
+    try {
+      costResult = await updateInventoryItemCostsBatch(admin, costUpdates);
+      if (costResult.failures.length > 0) {
+        console.warn(
+          `COGS push partial: ${costResult.updated} updated, ${costResult.skipped} skipped, ${costResult.failures.length} failed:`,
+          costResult.failures,
+        );
+      }
+    } catch (error) {
+      console.error("COGS push failed (non-fatal):", error);
+    }
   }
 
   // 4. Now that Shopify succeeded, update PO DB state.

@@ -24,6 +24,18 @@ const ADJUST_INVENTORY_MUTATION = `#graphql
   }
 `;
 
+const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
+  mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem {
+        id
+        unitCost { amount currencyCode }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
 // ============================================
 // QUERIES
 // ============================================
@@ -350,4 +362,60 @@ export async function getAvailableAtLocation(
   if (!inv) return 0;
   const level = inv.levels.find((l) => l.locationId === locationId);
   return level?.quantities.available ?? 0;
+}
+
+/**
+ * Update the COGS / unit cost on a single inventoryItem. Shopify's API has
+ * no native bulk form, so batched-cost updates just loop this.
+ *
+ * cost is a decimal in the shop's currency (no currency conversion done
+ * client-side — Shopify infers currency from the shop).
+ */
+export async function updateInventoryItemCost(
+  admin: AdminApiContext,
+  inventoryItemId: string,
+  cost: number,
+) {
+  if (cost <= 0) return { ok: true as const, skipped: true };
+  const response = await admin.graphql(INVENTORY_ITEM_UPDATE_MUTATION, {
+    variables: {
+      id: inventoryItemId,
+      input: { cost: cost.toFixed(2) },
+    },
+  });
+  const data = (await response.json()) as any;
+  const errors = data?.data?.inventoryItemUpdate?.userErrors ?? [];
+  if (errors.length > 0) {
+    return {
+      ok: false as const,
+      skipped: false,
+      error: errors.map((e: { message: string }) => e.message).join("; "),
+    };
+  }
+  return { ok: true as const, skipped: false };
+}
+
+/**
+ * Update COGS for many inventory items. Sequential — Shopify rate-limits are
+ * forgiving enough that a handful of receive lines won't be a problem.
+ * Returns a summary of successes + failures.
+ */
+export async function updateInventoryItemCostsBatch(
+  admin: AdminApiContext,
+  updates: Array<{ inventoryItemId: string; cost: number }>,
+): Promise<{ updated: number; skipped: number; failures: string[] }> {
+  let updated = 0;
+  let skipped = 0;
+  const failures: string[] = [];
+  for (const u of updates) {
+    try {
+      const r = await updateInventoryItemCost(admin, u.inventoryItemId, u.cost);
+      if ("skipped" in r && r.skipped) skipped++;
+      else if (r.ok) updated++;
+      else failures.push(`${u.inventoryItemId}: ${r.error}`);
+    } catch (error) {
+      failures.push(`${u.inventoryItemId}: ${String(error)}`);
+    }
+  }
+  return { updated, skipped, failures };
 }
