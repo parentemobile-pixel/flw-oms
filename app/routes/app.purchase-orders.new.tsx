@@ -423,25 +423,36 @@ export default function NewPurchaseOrder() {
     0,
   );
 
-  // Grid view: group by product, sizes as columns
+  // Grid view: group by (product + non-size options) with sizes as columns.
+  // Rows without any detected Size option are marked noSize — they render as
+  // a single-cell row that spans the size columns so single-variant products
+  // (or products whose axes are something like Material only) don't pollute
+  // the sized-product layout.
   const gridData = useMemo(() => {
     if (selectedItems.length === 0) return null;
 
-    // Collect all unique size values across selected items
+    const isSizeOption = (name: string) => {
+      const n = name.trim().toLowerCase();
+      // Shopify's "Title"/"Default Title" placeholder for single-variant
+      // products is NOT a size.
+      return n !== "title" && n.includes("size");
+    };
+
     const sizeValues = new Set<string>();
     const productGroups: Record<
       string,
       {
         productTitle: string;
-        // Key: non-size option combo -> { sizeVal -> item }
         rows: Record<
           string,
           {
             label: string;
             cost: number;
             retail: number;
-            stock: number;
             onOrder: number;
+            noSize: boolean;
+            // For sized rows, keys are size values (S/M/L/…).
+            // For noSize rows, the one variant lives under "_single".
             bySize: Record<string, SelectedVariant>;
           }
         >;
@@ -449,17 +460,24 @@ export default function NewPurchaseOrder() {
     > = {};
 
     for (const item of selectedItems) {
-      const sizeOpt = item.selectedOptions.find(
-        (o) => o.name.toLowerCase() === "size",
-      );
-      const sizeVal = sizeOpt?.value || "Default";
-      sizeValues.add(sizeVal);
-
-      const nonSizeOpts = item.selectedOptions
-        .filter((o) => o.name.toLowerCase() !== "size")
+      const opts = item.selectedOptions ?? [];
+      const sizeOpt = opts.find((o) => isSizeOption(o.name));
+      const nonSizeOpts = opts
+        .filter((o) => !isSizeOption(o.name))
+        // Hide Shopify's default "Title / Default Title" placeholder so a
+        // single-variant product doesn't get a "Default Title" label.
+        .filter(
+          (o) =>
+            !(
+              o.name.toLowerCase() === "title" &&
+              /^default title$/i.test(o.value)
+            ),
+        )
         .map((o) => o.value)
         .join(" / ");
+
       const rowKey = `${item.shopifyProductId}::${nonSizeOpts}`;
+      const noSize = !sizeOpt;
 
       if (!productGroups[item.shopifyProductId]) {
         productGroups[item.shopifyProductId] = {
@@ -470,24 +488,30 @@ export default function NewPurchaseOrder() {
       const group = productGroups[item.shopifyProductId];
       if (!group.rows[rowKey]) {
         group.rows[rowKey] = {
-          label: nonSizeOpts || item.productTitle,
+          label: nonSizeOpts,
           cost: item.unitCost,
           retail: item.retailPrice,
-          stock: 0,
           onOrder: 0,
+          noSize,
           bySize: {},
         };
       }
-      group.rows[rowKey].bySize[sizeVal] = item;
-      group.rows[rowKey].stock += item.currentStock;
+      if (noSize) {
+        group.rows[rowKey].bySize["_single"] = item;
+      } else {
+        const sizeVal = sizeOpt!.value;
+        sizeValues.add(sizeVal);
+        group.rows[rowKey].bySize[sizeVal] = item;
+      }
       group.rows[rowKey].onOrder += item.onOrder;
     }
 
-    // Sort sizes in a logical order
-    const sizeOrder = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "OS"];
+    const sizeOrder = [
+      "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL", "OS", "ONE SIZE",
+    ];
     const sortedSizes = [...sizeValues].sort((a, b) => {
-      const ai = sizeOrder.indexOf(a);
-      const bi = sizeOrder.indexOf(b);
+      const ai = sizeOrder.indexOf(a.toUpperCase());
+      const bi = sizeOrder.indexOf(b.toUpperCase());
       if (ai !== -1 && bi !== -1) return ai - bi;
       if (ai !== -1) return -1;
       if (bi !== -1) return 1;
@@ -1105,8 +1129,8 @@ function GridView({
             label: string;
             cost: number;
             retail: number;
-            stock: number;
             onOrder: number;
+            noSize: boolean;
             bySize: Record<string, SelectedVariant>;
           }
         >;
@@ -1117,6 +1141,63 @@ function GridView({
   onQuantityChange: (id: string, qty: string) => void;
 }) {
   const { productGroups, sortedSizes } = gridData;
+  const sizeColCount = Math.max(sortedSizes.length, 1);
+
+  // Each cell shows a qty input + "stock: N" beneath. Keeps per-size inventory
+  // visible at a glance without cluttering a separate aggregate column.
+  const renderSizedCell = (
+    item: SelectedVariant | undefined,
+    size: string,
+  ) => {
+    if (!item) {
+      return (
+        <td
+          key={size}
+          style={{
+            padding: "4px",
+            textAlign: "center",
+            background: "#f9f9f9",
+            color: "#9ca3af",
+          }}
+        >
+          —
+        </td>
+      );
+    }
+    return (
+      <td
+        key={size}
+        style={{
+          padding: "2px 4px",
+          verticalAlign: "top",
+        }}
+      >
+        <div>
+          <TextField
+            label="Qty"
+            labelHidden
+            value={String(item.quantityOrdered)}
+            onChange={(val) => onQuantityChange(item.shopifyVariantId, val)}
+            type="number"
+            autoComplete="off"
+            min={0}
+          />
+          <div
+            style={{
+              fontSize: "11px",
+              color: "#6b7280",
+              textAlign: "center",
+              marginTop: "2px",
+            }}
+            title={`${item.currentStock} in stock${item.onOrder > 0 ? `, ${item.onOrder} on order` : ""}`}
+          >
+            stock {item.currentStock}
+            {item.onOrder > 0 ? ` · +${item.onOrder}` : ""}
+          </div>
+        </div>
+      </td>
+    );
+  };
 
   return (
     <div style={{ overflowX: "auto" }}>
@@ -1129,105 +1210,118 @@ function GridView({
       >
         <thead>
           <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-            <th style={{ padding: "8px", textAlign: "left" }}>Product / Variant</th>
+            <th style={{ padding: "8px", textAlign: "left" }}>
+              Product / Variant
+            </th>
             <th style={{ padding: "8px", textAlign: "right" }}>Cost</th>
             <th style={{ padding: "8px", textAlign: "right" }}>Retail</th>
-            <th style={{ padding: "8px", textAlign: "right" }}>Stock</th>
-            <th style={{ padding: "8px", textAlign: "right" }}>On Order</th>
-            {sortedSizes.map((size) => (
-              <th
-                key={size}
-                style={{
-                  padding: "8px",
-                  textAlign: "center",
-                  minWidth: "60px",
-                }}
-              >
-                {size}
-              </th>
-            ))}
+            {sortedSizes.length > 0
+              ? sortedSizes.map((size) => (
+                  <th
+                    key={size}
+                    style={{
+                      padding: "8px",
+                      textAlign: "center",
+                      minWidth: "80px",
+                    }}
+                  >
+                    {size}
+                  </th>
+                ))
+              : (
+                  <th style={{ padding: "8px", textAlign: "center" }}>Qty</th>
+                )}
             <th style={{ padding: "8px", textAlign: "right" }}>Row Total</th>
           </tr>
         </thead>
         <tbody>
           {Object.entries(productGroups).map(([productId, group]) =>
             Object.entries(group.rows).map(([rowKey, row]) => {
-              const rowTotal = sortedSizes.reduce((sum, size) => {
-                const item = row.bySize[size];
-                return item ? sum + item.unitCost * item.quantityOrdered : sum;
-              }, 0);
-              const totalStock = sortedSizes.reduce((sum, size) => {
-                const item = row.bySize[size];
-                return item ? sum + item.currentStock : sum;
-              }, 0);
-              const totalOnOrder = sortedSizes.reduce((sum, size) => {
-                const item = row.bySize[size];
-                return item ? sum + item.onOrder : sum;
-              }, 0);
+              const rowTotal = Object.values(row.bySize).reduce(
+                (sum, item) => sum + item.unitCost * item.quantityOrdered,
+                0,
+              );
 
               return (
                 <tr
                   key={rowKey}
                   style={{ borderBottom: "1px solid #f1f1f1" }}
                 >
-                  <td style={{ padding: "8px", fontWeight: 500 }}>
+                  <td style={{ padding: "8px", fontWeight: 500, verticalAlign: "top" }}>
                     {group.productTitle}
-                    {row.label && row.label !== group.productTitle && (
+                    {row.label && (
                       <Text as="span" variant="bodySm" tone="subdued">
                         {" "}
                         — {row.label}
                       </Text>
                     )}
+                    {row.onOrder > 0 && (
+                      <div style={{ fontSize: "11px", color: "#6b7280" }}>
+                        {row.onOrder} on order
+                      </div>
+                    )}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "right" }}>
+                  <td style={{ padding: "8px", textAlign: "right", verticalAlign: "top" }}>
                     ${row.cost.toFixed(2)}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "right" }}>
+                  <td style={{ padding: "8px", textAlign: "right", verticalAlign: "top" }}>
                     ${row.retail.toFixed(2)}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "right" }}>
-                    {totalStock}
-                  </td>
-                  <td style={{ padding: "8px", textAlign: "right" }}>
-                    {totalOnOrder > 0 ? totalOnOrder : "—"}
-                  </td>
-                  {sortedSizes.map((size) => {
-                    const item = row.bySize[size];
-                    if (!item) {
-                      return (
-                        <td
-                          key={size}
-                          style={{
-                            padding: "4px",
-                            textAlign: "center",
-                            background: "#f9f9f9",
-                          }}
-                        >
-                          —
-                        </td>
-                      );
-                    }
-                    return (
-                      <td key={size} style={{ padding: "2px 4px" }}>
-                        <TextField
-                          label=""
-                          labelHidden
-                          value={String(item.quantityOrdered)}
-                          onChange={(val) =>
-                            onQuantityChange(item.shopifyVariantId, val)
-                          }
-                          type="number"
-                          autoComplete="off"
-                          min={0}
-                        />
-                      </td>
-                    );
-                  })}
+
+                  {row.noSize ? (
+                    // Single-variant row — qty input spans all size columns
+                    <td
+                      colSpan={sizeColCount}
+                      style={{ padding: "2px 4px", verticalAlign: "top" }}
+                    >
+                      {(() => {
+                        const item = row.bySize["_single"];
+                        if (!item) return <>—</>;
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "12px",
+                            }}
+                          >
+                            <div style={{ maxWidth: "120px" }}>
+                              <TextField
+                                label="Qty"
+                                labelHidden
+                                value={String(item.quantityOrdered)}
+                                onChange={(val) =>
+                                  onQuantityChange(item.shopifyVariantId, val)
+                                }
+                                type="number"
+                                autoComplete="off"
+                                min={0}
+                              />
+                            </div>
+                            <div
+                              style={{ fontSize: "12px", color: "#6b7280" }}
+                            >
+                              {item.currentStock} in stock
+                              {item.onOrder > 0
+                                ? ` · ${item.onOrder} on order`
+                                : ""}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </td>
+                  ) : (
+                    sortedSizes.map((size) =>
+                      renderSizedCell(row.bySize[size], size),
+                    )
+                  )}
+
                   <td
                     style={{
                       padding: "8px",
                       textAlign: "right",
                       fontWeight: 600,
+                      verticalAlign: "top",
                     }}
                   >
                     ${rowTotal.toFixed(2)}
