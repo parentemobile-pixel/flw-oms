@@ -18,7 +18,12 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     })),
   );
 
-  return new Response(pdfBuffer, {
+  // Convert Node Buffer -> Uint8Array so the web-standard Response body
+  // accepts it. Passing a raw Buffer can silently fail in Remix's runtime.
+  const pdfBytes = new Uint8Array(pdfBuffer);
+
+  return new Response(pdfBytes, {
+    status: 200,
     headers: {
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="labels-${po.poNumber}.pdf"`,
