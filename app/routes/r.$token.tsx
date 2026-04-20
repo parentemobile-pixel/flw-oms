@@ -20,15 +20,21 @@ import {
   BlockStack,
   Text,
   Badge,
-  TextField,
   Button,
   Banner,
   InlineStack,
   ButtonGroup,
+  Modal,
+  EmptyState,
+  Divider,
 } from "@shopify/polaris";
 import enTranslations from "@shopify/polaris/locales/en.json";
 
 import { getPurchaseOrderByToken } from "../services/purchase-orders/po-service.server";
+
+// Hidden for now — scan mode is preserved but not rendered on the QR page.
+// Flip to true to bring back the "Scan SKU or barcode…" card.
+const SHOW_SCAN_MODE_QR = false;
 import { unauthenticated } from "../shopify.server";
 import {
   adjustInventoryBatch,
@@ -270,6 +276,14 @@ export default function ScanReceivePage() {
   });
 
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
+  const [markAllModalOpen, setMarkAllModalOpen] = useState(false);
+
+  // Once the backend confirms success, we lock the UI into a confirmation
+  // state — prevents double-submission (a second receive would be a no-op
+  // but it's still confusing for the user).
+  const submitted = Boolean(
+    actionData && "ok" in actionData && actionData.ok === true,
+  );
 
   const scanLookup = useMemo(() => {
     const map: Record<string, string> = {};
@@ -373,6 +387,19 @@ export default function ScanReceivePage() {
     submit(fd, { method: "post" });
   }, [po.lineItems, quantities, submit]);
 
+  // Mark-all-and-submit: bypass the quantities state entirely so there's no
+  // React async-update race. Fires a POST with every line set to ordered qty.
+  const handleConfirmMarkAll = useCallback(() => {
+    const changes = po.lineItems.map((li) => ({
+      lineItemId: li.id,
+      quantityReceived: li.quantityOrdered,
+    }));
+    const fd = new FormData();
+    fd.set("changes", JSON.stringify(changes));
+    submit(fd, { method: "post" });
+    setMarkAllModalOpen(false);
+  }, [po.lineItems, submit]);
+
   const receivedNow = po.lineItems.reduce(
     (s, li) => s + (quantities[li.id] ?? li.quantityReceived),
     0,
@@ -389,83 +416,147 @@ export default function ScanReceivePage() {
         subtitle={po.vendor ?? undefined}
       >
         <Layout>
-          {actionData && "ok" in actionData && actionData.ok && (
+          {/* ── Submitted state: replaces everything else ── */}
+          {submitted && (
             <Layout.Section>
-              <Banner tone="success">{actionData.message}</Banner>
+              <Card>
+                <EmptyState
+                  heading="Received and saved"
+                  image=""
+                >
+                  <BlockStack gap="300">
+                    <Text as="p" variant="bodyMd">
+                      {actionData && "message" in actionData
+                        ? (actionData as { message: string }).message
+                        : "Inventory updated in Shopify."}
+                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      You can close this tab. To avoid double-receiving,
+                      don&apos;t submit again — if anything needs
+                      adjusting, have a manager open the PO in the admin.
+                    </Text>
+                  </BlockStack>
+                </EmptyState>
+              </Card>
             </Layout.Section>
           )}
-          {actionData && "error" in actionData && (
+
+          {!submitted && actionData && "error" in actionData && (
             <Layout.Section>
               <Banner tone="critical">{actionData.error as string}</Banner>
             </Layout.Section>
           )}
 
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="300">
-                <InlineStack align="space-between" blockAlign="center" wrap>
+          {/* ── Happy path: big "Mark all received" button at the top ── */}
+          {!submitted && (
+            <Layout.Section>
+              <Card>
+                <BlockStack gap="400">
                   <InlineStack gap="200" blockAlign="center">
                     <Badge>{po.status}</Badge>
                     <Text as="span" variant="bodyMd">
-                      {receivedNow} / {totalOrdered} units
+                      {totalOrdered} unit{totalOrdered !== 1 ? "s" : ""} on this PO
                     </Text>
                   </InlineStack>
-                  <ButtonGroup>
-                    <Button onClick={handleMarkAllReceived}>
-                      Mark all received
-                    </Button>
-                    <Button onClick={handleClearAll}>Clear</Button>
-                  </ButtonGroup>
-                </InlineStack>
-                <Text as="p" variant="bodySm" tone="subdued">
-                  Each line starts at the ordered quantity. Use − / + to
-                  deduct missing or damaged units, or tap &ldquo;Mark
-                  received&rdquo; per line. Save when done to sync Shopify.
-                </Text>
-              </BlockStack>
-            </Card>
-          </Layout.Section>
 
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="300">
-                <Text as="h2" variant="headingMd">
-                  Scan
-                </Text>
-                <input
-                  type="text"
-                  autoFocus
-                  placeholder="Scan SKU or barcode…"
-                  onKeyDown={handleScanInput}
-                  style={{
-                    width: "100%",
-                    padding: "12px",
-                    fontSize: "16px",
-                    border: "1px solid #ccc",
-                    borderRadius: "6px",
-                  }}
-                />
-                {scanFeedback && (
-                  <Text
-                    as="p"
-                    variant="bodySm"
-                    tone={
-                      scanFeedback.startsWith("✓") ? "success" : "subdued"
-                    }
-                  >
-                    {scanFeedback}
+                  <Text as="p" variant="headingMd">
+                    Did everything arrive exactly as ordered?
                   </Text>
-                )}
-              </BlockStack>
-            </Card>
-          </Layout.Section>
+                  <Text as="p" variant="bodyMd" tone="subdued">
+                    Tap below and we&apos;ll mark the entire PO received and
+                    update Shopify. If any unit is missing or damaged,
+                    scroll down and adjust per line instead.
+                  </Text>
 
+                  <Button
+                    variant="primary"
+                    size="large"
+                    fullWidth
+                    onClick={() => setMarkAllModalOpen(true)}
+                    disabled={isSubmitting}
+                  >
+                    ✓ Mark all {totalOrdered} received
+                  </Button>
+                </BlockStack>
+              </Card>
+            </Layout.Section>
+          )}
+
+          {/* Manual-adjust helpers, less prominent */}
+          {!submitted && (
+            <Layout.Section>
+              <Card>
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    Running total: {receivedNow} / {totalOrdered} units
+                  </Text>
+                  <Button onClick={handleClearAll} size="slim" variant="plain">
+                    Clear all
+                  </Button>
+                </InlineStack>
+              </Card>
+            </Layout.Section>
+          )}
+
+          {/* Hidden scan card — preserved, flip SHOW_SCAN_MODE_QR to re-enable */}
+          {SHOW_SCAN_MODE_QR && !submitted && (
+            <Layout.Section>
+              <Card>
+                <BlockStack gap="300">
+                  <Text as="h2" variant="headingMd">
+                    Scan
+                  </Text>
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Scan SKU or barcode…"
+                    onKeyDown={handleScanInput}
+                    style={{
+                      width: "100%",
+                      padding: "12px",
+                      fontSize: "16px",
+                      border: "1px solid #ccc",
+                      borderRadius: "6px",
+                    }}
+                  />
+                  {scanFeedback && (
+                    <Text
+                      as="p"
+                      variant="bodySm"
+                      tone={
+                        scanFeedback.startsWith("✓") ? "success" : "subdued"
+                      }
+                    >
+                      {scanFeedback}
+                    </Text>
+                  )}
+                </BlockStack>
+              </Card>
+            </Layout.Section>
+          )}
+
+          {!submitted && (
+            <Layout.Section>
+              <Divider />
+            </Layout.Section>
+          )}
+
+          {!submitted && (
+            <Layout.Section>
+              <Text as="h2" variant="headingMd">
+                Or adjust per item
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                Start from the ordered amount and deduct missing or damaged
+                units. Tap &ldquo;Save&rdquo; at the bottom when done.
+              </Text>
+            </Layout.Section>
+          )}
+
+          {!submitted && (
           <Layout.Section>
             <Card>
               <BlockStack gap="300">
-                <Text as="h2" variant="headingMd">
-                  Line items
-                </Text>
                 {po.lineItems.map((li) => {
                   const currentQty =
                     quantities[li.id] ?? li.quantityOrdered;
@@ -554,24 +645,68 @@ export default function ScanReceivePage() {
               </BlockStack>
             </Card>
           </Layout.Section>
+          )}
 
-          <Layout.Section>
-            <ButtonGroup fullWidth>
-              <Button
-                variant="primary"
-                onClick={handleSubmit}
-                loading={isSubmitting}
-                size="large"
-              >
-                Save received quantities
-              </Button>
-            </ButtonGroup>
-          </Layout.Section>
+          {!submitted && (
+            <Layout.Section>
+              <ButtonGroup fullWidth>
+                <Button
+                  variant="primary"
+                  onClick={handleSubmit}
+                  loading={isSubmitting}
+                  size="large"
+                >
+                  Save adjusted quantities
+                </Button>
+              </ButtonGroup>
+            </Layout.Section>
+          )}
 
           <Layout.Section>
             <div style={{ height: "3rem" }} />
           </Layout.Section>
         </Layout>
+
+        {/* Confirmation modal for the "Mark all received" button */}
+        <Modal
+          open={markAllModalOpen && !submitted}
+          onClose={() => setMarkAllModalOpen(false)}
+          title="Mark everything received?"
+          primaryAction={{
+            content: isSubmitting
+              ? "Saving…"
+              : `Yes, receive all ${totalOrdered}`,
+            onAction: handleConfirmMarkAll,
+            loading: isSubmitting,
+          }}
+          secondaryActions={[
+            {
+              content: "Cancel",
+              onAction: () => setMarkAllModalOpen(false),
+            },
+          ]}
+        >
+          <Modal.Section>
+            <BlockStack gap="300">
+              <Text as="p" variant="bodyMd">
+                This will mark all{" "}
+                <Text as="span" fontWeight="semibold">
+                  {totalOrdered} units
+                </Text>{" "}
+                on PO{" "}
+                <Text as="span" fontWeight="semibold">
+                  {po.poNumber}
+                </Text>{" "}
+                as received and update Shopify inventory immediately.
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                This can&apos;t be undone from here — if you need to adjust
+                after submitting, a manager will have to open the PO in the
+                admin app.
+              </Text>
+            </BlockStack>
+          </Modal.Section>
+        </Modal>
       </Page>
     </AppProvider>
   );
