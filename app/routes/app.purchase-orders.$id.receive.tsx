@@ -292,20 +292,6 @@ export default function ReceivePurchaseOrder() {
     [],
   );
 
-  const handleIncrement = useCallback((lineItemId: string) => {
-    setQuantities((prev) => ({
-      ...prev,
-      [lineItemId]: (prev[lineItemId] ?? 0) + 1,
-    }));
-  }, []);
-
-  const handleDecrement = useCallback((lineItemId: string) => {
-    setQuantities((prev) => ({
-      ...prev,
-      [lineItemId]: Math.max(0, (prev[lineItemId] ?? 0) - 1),
-    }));
-  }, []);
-
   const handleReceiveAll = useCallback(() => {
     const allReceived: Record<string, number> = {};
     for (const li of po.lineItems) allReceived[li.id] = li.quantityOrdered;
@@ -480,8 +466,6 @@ export default function ReceivePurchaseOrder() {
                   lineItems={po.lineItems}
                   quantities={quantities}
                   onQuantityChange={handleQuantityChange}
-                  onIncrement={handleIncrement}
-                  onDecrement={handleDecrement}
                   onMarkRowReceived={handleMarkLinesReceived}
                 />
               ) : (
@@ -489,8 +473,6 @@ export default function ReceivePurchaseOrder() {
                   lineItems={po.lineItems}
                   quantities={quantities}
                   onQuantityChange={handleQuantityChange}
-                  onIncrement={handleIncrement}
-                  onDecrement={handleDecrement}
                   onMarkRowReceived={handleMarkLinesReceived}
                 />
               )}
@@ -568,34 +550,21 @@ function compareSizes(a: string, b: string): number {
 }
 
 /**
- * +/- counter: big tap targets so a warehouse person can count items
- * without typing. Keeps the current value in a small read-only
- * TextField between the buttons so users can see the number clearly.
+ * Simple quantity input with an "/ N" readout for context. Admin users
+ * (warehouse with keyboard) prefer typing, so no +/- buttons here.
  */
-function QtyStepper({
+function QtyInput({
   value,
   max,
-  onDecrement,
-  onIncrement,
   onChange,
 }: {
   value: number;
   max: number;
-  onDecrement: () => void;
-  onIncrement: () => void;
   onChange: (v: number) => void;
 }) {
   return (
     <InlineStack gap="100" blockAlign="center" wrap={false}>
-      <Button
-        onClick={onDecrement}
-        disabled={value <= 0}
-        accessibilityLabel="Decrement"
-        size="slim"
-      >
-        −
-      </Button>
-      <div style={{ width: "56px" }}>
+      <div style={{ width: "72px" }}>
         <TextField
           label="Qty"
           labelHidden
@@ -607,13 +576,6 @@ function QtyStepper({
           min={0}
         />
       </div>
-      <Button
-        onClick={onIncrement}
-        accessibilityLabel="Increment"
-        size="slim"
-      >
-        +
-      </Button>
       <Text as="span" variant="bodySm" tone="subdued">
         / {max}
       </Text>
@@ -627,15 +589,11 @@ function POReceiveLine({
   lineItems,
   quantities,
   onQuantityChange,
-  onIncrement,
-  onDecrement,
   onMarkRowReceived,
 }: {
   lineItems: ReceiveLine[];
   quantities: Record<string, number>;
   onQuantityChange: (id: string, v: number) => void;
-  onIncrement: (id: string) => void;
-  onDecrement: (id: string) => void;
   onMarkRowReceived: (ids: string[]) => void;
 }) {
   return (
@@ -674,11 +632,9 @@ function POReceiveLine({
                   {li.quantityReceived}
                 </td>
                 <td style={{ padding: "4px 8px" }}>
-                  <QtyStepper
+                  <QtyInput
                     value={currentQty}
                     max={li.quantityOrdered}
-                    onDecrement={() => onDecrement(li.id)}
-                    onIncrement={() => onIncrement(li.id)}
                     onChange={(v) => onQuantityChange(li.id, v)}
                   />
                 </td>
@@ -709,15 +665,11 @@ function POReceiveGrid({
   lineItems,
   quantities,
   onQuantityChange,
-  onIncrement,
-  onDecrement,
   onMarkRowReceived,
 }: {
   lineItems: ReceiveLine[];
   quantities: Record<string, number>;
   onQuantityChange: (id: string, v: number) => void;
-  onIncrement: (id: string) => void;
-  onDecrement: (id: string) => void;
   onMarkRowReceived: (ids: string[]) => void;
 }) {
   const sizeSet = new Set<string>();
@@ -828,11 +780,9 @@ function POReceiveGrid({
                       const li = g.bySize["_single"];
                       if (!li) return "—";
                       return (
-                        <QtyStepper
+                        <QtyInput
                           value={quantities[li.id] ?? 0}
                           max={li.quantityOrdered}
-                          onDecrement={() => onDecrement(li.id)}
-                          onIncrement={() => onIncrement(li.id)}
                           onChange={(v) => onQuantityChange(li.id, v)}
                         />
                       );
@@ -861,11 +811,9 @@ function POReceiveGrid({
                         key={s}
                         style={{ padding: "4px 8px", verticalAlign: "top" }}
                       >
-                        <QtyStepper
+                        <QtyInput
                           value={quantities[li.id] ?? 0}
                           max={li.quantityOrdered}
-                          onDecrement={() => onDecrement(li.id)}
-                          onIncrement={() => onIncrement(li.id)}
                           onChange={(v) => onQuantityChange(li.id, v)}
                         />
                         {li.quantityReceived > 0 && (
