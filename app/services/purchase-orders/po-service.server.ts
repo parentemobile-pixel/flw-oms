@@ -1,6 +1,5 @@
 import db from "../../db.server";
 import { format } from "date-fns";
-import { randomUUID } from "node:crypto";
 
 // ============================================
 // TYPES
@@ -365,15 +364,3 @@ export async function getOnOrderQuantities(
   return onOrder;
 }
 
-/**
- * Regenerate the receive token — invalidates any existing printed QR codes.
- * Use when the token is suspected leaked or the PO is re-issued.
- */
-export async function rotateReceiveToken(shop: string, id: string) {
-  // randomUUID is stable enough for a 36-char URL-safe token; the receive
-  // route matches by the full token so collisions are effectively impossible.
-  return db.purchaseOrder.update({
-    where: { id },
-    data: { receiveToken: randomUUID() },
-  });
-}
