@@ -39,13 +39,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const url = new URL(request.url);
   const vendor = url.searchParams.get("vendor");
+  const tag = url.searchParams.get("tag");
   const coverage = parseFloat(url.searchParams.get("coverage") ?? "1.0");
 
-  const rows = await getPlanningTable(admin, session.shop, {
+  const allRows = await getPlanningTable(admin, session.shop, {
     periodDays: 365,
     coverageMultiplier: Number.isFinite(coverage) ? coverage : 1.0,
     vendorFilter: vendor || null,
   });
+
+  // Tag filter is applied post-fetch so the vendor dropdown still reflects
+  // every vendor in the unfiltered set.
+  const rows = tag
+    ? allRows.filter((r) =>
+        r.tags.some((t) => t.toLowerCase() === tag.toLowerCase()),
+      )
+    : allRows;
 
   const syncStatus = await db.syncStatus.findUnique({
     where: { shop: session.shop },
@@ -53,13 +62,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const vendors = [
     ...new Set(
-      rows
+      allRows
         .map((r) => r.vendor)
         .filter((v): v is string => !!v),
     ),
   ].sort();
 
-  return json({ rows, syncStatus, vendors });
+  return json({ rows, syncStatus, vendors, tag: tag ?? null });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -127,7 +136,7 @@ type SortKey =
   | "suggestedOrder";
 
 export default function Planning() {
-  const { rows, syncStatus, vendors } = useLoaderData<typeof loader>();
+  const { rows, syncStatus, vendors, tag } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
@@ -288,6 +297,30 @@ export default function Planning() {
       subtitle="Buy planning grounded in YoY sales, OOS-adjusted velocity, and current stock"
     >
       <Layout>
+        {/* Lens toggle */}
+        <Layout.Section>
+          <InlineStack gap="200">
+            <Button pressed variant="primary">
+              Products
+            </Button>
+            <Button url="/app/planning/categories">
+              Categories &amp; Seasons
+            </Button>
+          </InlineStack>
+        </Layout.Section>
+
+        {tag && (
+          <Layout.Section>
+            <Banner
+              tone="info"
+              title={`Filtered to tag: ${tag}`}
+              onDismiss={() => setParam("tag", "")}
+            >
+              Showing only products tagged “{tag}”. Dismiss to see everything.
+            </Banner>
+          </Layout.Section>
+        )}
+
         {actionData && "ok" in actionData && (
           <Layout.Section>
             <Banner tone="success">
