@@ -316,6 +316,28 @@ model ProductBulkActionChange {
 }
 
 // ============================================
+// REPORTS (V2.1 — Reports module)
+// ============================================
+// Nightly snapshot of inventory value at each (shop, location, optional
+// vendor) slice. Required for turnover math (COGS / avg inventory across
+// the period) and for historical stock-on-hand trends.
+model InventoryValueSnapshot {
+  id               String   @id @default(cuid())
+  shop             String
+  locationId       String
+  vendor           String? // null = all-vendor rollup for that location
+  periodEnd        DateTime // end-of-day timestamp the snapshot represents
+  totalUnits       Int      @default(0)
+  totalCostValue   Float    @default(0)
+  totalRetailValue Float    @default(0)
+  generatedAt      DateTime @default(now())
+
+  @@unique([shop, locationId, vendor, periodEnd])
+  @@index([shop, periodEnd])
+  @@index([shop, locationId, periodEnd])
+}
+
+// ============================================
 // PRODUCT BUILDER (templates, optional)
 // ============================================
 model ProductTemplate {
