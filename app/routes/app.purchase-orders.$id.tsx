@@ -5,7 +5,6 @@ import {
   useActionData,
   useFetcher,
   useLoaderData,
-  useNavigate,
   useNavigation,
   useSubmit,
 } from "@remix-run/react";
@@ -226,7 +225,6 @@ export default function PurchaseOrderDetail() {
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
-  const navigate = useNavigate();
   const navigation = useNavigation();
   const isSaving = navigation.state === "submitting";
 
@@ -620,28 +618,9 @@ export default function PurchaseOrderDetail() {
             </Button>
           </ButtonGroup>
         );
-      case "ordered":
-        return (
-          <Button
-            variant="primary"
-            onClick={() =>
-              navigate(`/app/purchase-orders/${po.id}/receive`)
-            }
-          >
-            Receive Items
-          </Button>
-        );
-      case "partially_received":
-        return (
-          <Button
-            variant="primary"
-            onClick={() =>
-              navigate(`/app/purchase-orders/${po.id}/receive`)
-            }
-          >
-            Continue Receiving
-          </Button>
-        );
+      // ordered / partially_received / received / cancelled all get their
+      // "next step" button via the Page.primaryAction slot in the header —
+      // no inline action needed here.
       default:
         return null;
     }
@@ -654,11 +633,40 @@ export default function PurchaseOrderDetail() {
     )
     .map((v) => ({ value: v, label: v }));
 
-  const primaryAction = canEdit
-    ? isEditing
-      ? { content: "Save changes", onAction: handleSave, loading: isSaving }
-      : { content: "Edit", onAction: () => setIsEditing(true) }
-    : undefined;
+  // Primary action — branches on status so the most useful next step is
+  // always one click away. Uses the Page.primaryAction `url` prop for the
+  // Receive flow; that routes through App Bridge and navigates reliably
+  // inside the embedded iframe (plain Polaris Button `url` and useNavigate()
+  // both had issues from the iframe).
+  const primaryAction = isEditing
+    ? { content: "Save changes", onAction: handleSave, loading: isSaving }
+    : po.status === "ordered"
+      ? {
+          content: "Receive Items",
+          url: `/app/purchase-orders/${po.id}/receive`,
+        }
+      : po.status === "partially_received"
+        ? {
+            content: "Continue Receiving",
+            url: `/app/purchase-orders/${po.id}/receive`,
+          }
+        : canEdit
+          ? { content: "Edit", onAction: () => setIsEditing(true) }
+          : undefined;
+
+  // In edit mode we still want Edit/Save; outside edit mode if the primary
+  // action is Receive we keep Edit accessible via secondary actions.
+  const extraSecondaryActions =
+    !isEditing &&
+    canEdit &&
+    (po.status === "ordered" || po.status === "partially_received")
+      ? [
+          {
+            content: "Edit",
+            onAction: () => setIsEditing(true),
+          },
+        ]
+      : [];
 
   return (
     <Page
@@ -674,6 +682,7 @@ export default function PurchaseOrderDetail() {
         isEditing
           ? [{ content: "Cancel", onAction: handleCancelEdit }]
           : [
+              ...extraSecondaryActions,
               {
                 content:
                   isGenerating === "labels" ? "Generating…" : "Print Labels",
