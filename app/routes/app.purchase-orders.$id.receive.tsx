@@ -577,12 +577,18 @@ function QtyInput({
         <TextField
           label="Qty"
           labelHidden
-          type="number"
+          // type="text" + inputMode="numeric" → no spinner arrows eating
+          // the 56px width, but phone keyboards still default to numeric.
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
           value={String(value)}
-          onChange={(val) => onChange(parseInt(val, 10) || 0)}
+          onChange={(val) => {
+            const digitsOnly = val.replace(/[^0-9]/g, "");
+            onChange(parseInt(digitsOnly, 10) || 0);
+          }}
           autoComplete="off"
           align="center"
-          min={0}
         />
       </div>
       <Text as="span" variant="bodySm" tone="subdued">
