@@ -22,3 +22,7 @@ pnpm-lock.yaml
 # Ignore shopify files created during app dev
 .shopify/*
 .shopify.lock
+
+# Spawned-task worktrees live here — each is its own git working tree for
+# parallel side-task sessions. Never track them in the main repo.
+/.claude/
