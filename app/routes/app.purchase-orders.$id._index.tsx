@@ -381,16 +381,21 @@ export default function PurchaseOrderDetail() {
   );
 
   const handleDelete = useCallback(() => {
-    if (
-      !window.confirm(
-        "Delete this PO? This can't be undone. Inventory is unaffected.",
-      )
-    )
-      return;
+    // Stronger copy when the PO has already been acted on. Deleting a
+    // received PO doesn't roll back the Shopify inventory that was added
+    // when receipts were processed — it just removes the PO record and
+    // its audit trail from our DB.
+    const hasActivity =
+      po.status !== "draft" &&
+      po.status !== "cancelled";
+    const msg = hasActivity
+      ? `Delete PO ${po.poNumber}? Status is "${po.status.replace(/_/g, " ")}" — any inventory already adjusted from receipts will NOT be rolled back. This only removes the PO and its audit trail. Continue?`
+      : `Delete PO ${po.poNumber}? This can't be undone. Inventory is unaffected.`;
+    if (!window.confirm(msg)) return;
     const fd = new FormData();
     fd.set("intent", "delete");
     submit(fd, { method: "post" });
-  }, [submit]);
+  }, [submit, po.poNumber, po.status]);
 
   const handleSave = useCallback(() => {
     const fd = new FormData();
@@ -708,6 +713,18 @@ export default function PurchaseOrderDetail() {
                 loading: isGenerating === "pdf-grid",
                 disabled: isGenerating !== null,
               },
+              // Delete is always available (except when already cancelled)
+              // so users can clean up test POs or mistakes regardless of
+              // status. Stronger confirmation kicks in for non-draft POs.
+              ...(po.status !== "cancelled"
+                ? [
+                    {
+                      content: "Delete",
+                      destructive: true,
+                      onAction: handleDelete,
+                    },
+                  ]
+                : []),
             ]
       }
     >
