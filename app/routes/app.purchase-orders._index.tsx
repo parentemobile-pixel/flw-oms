@@ -80,6 +80,12 @@ export default function PurchaseOrdersList() {
         content: "Create PO",
         url: "/app/purchase-orders/new",
       }}
+      secondaryActions={[
+        {
+          content: "Import PDF",
+          url: "/app/purchase-orders/import",
+        },
+      ]}
     >
       <Layout>
         <Layout.Section>
