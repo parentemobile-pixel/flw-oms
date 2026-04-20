@@ -29,6 +29,13 @@ import {
 import enTranslations from "@shopify/polaris/locales/en.json";
 
 import { getPurchaseOrderByToken } from "../services/purchase-orders/po-service.server";
+import { unauthenticated } from "../shopify.server";
+import {
+  adjustInventoryBatch,
+  getVariantsInventory,
+  updateInventoryItemCostsBatch,
+} from "../services/shopify-api/inventory.server";
+import db from "../db.server";
 
 export const links: LinksFunction = () => [
   { rel: "stylesheet", href: polarisStyles },
@@ -38,16 +45,15 @@ export const links: LinksFunction = () => [
  * Public scan-to-receive page — accessed via the QR code printed on the PO PDF.
  *
  * Auth model: the URL contains a per-PO random token (stored as receiveToken
- * on PurchaseOrder). No Shopify session is required to view or submit — any
- * physical holder of the QR can receive items. Token can be rotated via
- * rotateReceiveToken() if compromised.
+ * on PurchaseOrder). No Shopify admin session is required on the browser
+ * side — any holder of the QR can scan and receive items. Token can be
+ * rotated via rotateReceiveToken() if compromised.
  *
- * Because we don't have a Shopify admin context here, we can't talk directly
- * to Shopify GraphQL from this route. Instead we record the received
- * quantities in our DB; the Shopify inventory adjustment happens in a
- * follow-up background job OR the next time someone with admin access opens
- * the PO and the app reconciles. For V2 simplicity we just update the DB
- * and surface a clear "pending Shopify sync" note.
+ * Shopify API access: we use the app's OFFLINE session (stored when the
+ * merchant installed the app) via shopify.unauthenticated.admin(shop).
+ * That gives us a fully authenticated admin client even though the visitor
+ * to this route has no session cookie. Result: scan-to-receive actually
+ * adjusts Shopify inventory + pushes COGS, same as the in-admin receive flow.
  */
 export const loader = async ({ params }: LoaderFunctionArgs) => {
   const po = await getPurchaseOrderByToken(params.token!);
@@ -70,20 +76,181 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     quantityReceived: number;
   }>;
 
-  // Import lazily to keep route small on public path
   const { receiveLineItems } = await import(
     "../services/purchase-orders/po-service.server"
   );
 
+  // Determine the destination location. Prefer the PO's explicit
+  // shopifyLocationId; otherwise fall back to the first location for the shop.
+  const locationId = po.shopifyLocationId;
+  if (!locationId) {
+    return json({
+      error:
+        "This PO has no destination location set. Open it in the admin and set 'Receive at location' first.",
+    });
+  }
+
+  // Compute per-line deltas vs. what's already been received in the DB. Skip
+  // lines with no change so the Shopify mutation only carries real work.
+  const withDeltas: Array<{
+    lineItemId: string;
+    shopifyVariantId: string;
+    unitCost: number;
+    delta: number;
+    previous: number;
+    next: number;
+  }> = [];
+  for (const c of changes) {
+    const line = po.lineItems.find((li) => li.id === c.lineItemId);
+    if (!line) continue;
+    const delta = c.quantityReceived - line.quantityReceived;
+    if (delta === 0) continue;
+    withDeltas.push({
+      lineItemId: c.lineItemId,
+      shopifyVariantId: line.shopifyVariantId,
+      unitCost: line.unitCost,
+      delta,
+      previous: line.quantityReceived,
+      next: c.quantityReceived,
+    });
+  }
+
+  if (withDeltas.length === 0) {
+    return json({
+      ok: true as const,
+      message: "No changes to save.",
+    });
+  }
+
+  // Open an admin client using the app's offline session for this shop.
+  let admin: Awaited<ReturnType<typeof unauthenticated.admin>>["admin"];
+  try {
+    const ctx = await unauthenticated.admin(po.shop);
+    admin = ctx.admin;
+  } catch (error) {
+    console.error("Scan-to-receive: couldn't get offline admin", error);
+    return json({
+      error:
+        "App session for this shop isn't available. A manager needs to re-open the app in the Shopify admin, then try again.",
+    });
+  }
+
+  // Resolve inventoryItem IDs via one batched call.
+  let inventoryMap: Awaited<ReturnType<typeof getVariantsInventory>>;
+  try {
+    inventoryMap = await getVariantsInventory(
+      admin,
+      [...new Set(withDeltas.map((d) => d.shopifyVariantId))],
+    );
+  } catch (error) {
+    console.error("Scan-to-receive: variant inventory fetch failed", error);
+    return json({
+      error: `Couldn't fetch Shopify inventory info: ${String(error)}`,
+    });
+  }
+
+  const inventoryChanges = withDeltas
+    .map((d) => {
+      const inv = inventoryMap.get(d.shopifyVariantId);
+      if (!inv) return null;
+      return {
+        inventoryItemId: inv.inventoryItemId,
+        locationId,
+        delta: d.delta,
+        shopifyVariantId: d.shopifyVariantId,
+        lineItemId: d.lineItemId,
+        unitCost: d.unitCost,
+        previous: d.previous,
+        next: d.next,
+      };
+    })
+    .filter((c): c is NonNullable<typeof c> => c !== null);
+
+  if (inventoryChanges.length !== withDeltas.length) {
+    const missing = withDeltas.length - inventoryChanges.length;
+    return json({
+      error: `${missing} line item(s) have no matching Shopify inventory — their variants may have been deleted. No changes applied.`,
+    });
+  }
+
+  // Apply inventory adjustments as a single batched mutation.
+  try {
+    const result = await adjustInventoryBatch(
+      admin,
+      inventoryChanges.map((c) => ({
+        inventoryItemId: c.inventoryItemId,
+        locationId: c.locationId,
+        delta: c.delta,
+      })),
+      "received",
+    );
+    if (result.userErrors?.length > 0) {
+      return json({
+        error:
+          "Shopify rejected the adjustment: " +
+          result.userErrors
+            .map((e: { message: string }) => e.message)
+            .join("; "),
+      });
+    }
+
+    // Audit log (same shape the in-admin receive writes).
+    await db.inventoryAdjustmentSession.create({
+      data: {
+        shop: po.shop,
+        locationId,
+        reason: "received",
+        source: "po_receive",
+        sourceId: po.id,
+        notes: `Scan-to-receive: ${withDeltas.length} line(s)`,
+        changes: {
+          create: inventoryChanges.map((c) => ({
+            shopifyVariantId: c.shopifyVariantId,
+            shopifyInventoryItemId: c.inventoryItemId,
+            previousQuantity: c.previous,
+            newQuantity: c.next,
+            delta: c.delta,
+          })),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Scan-to-receive: Shopify adjustment failed", error);
+    return json({
+      error: `Shopify adjustment failed, no PO state changed: ${String(error)}`,
+    });
+  }
+
+  // COGS push (best effort — doesn't fail the whole receive).
+  const costUpdates = inventoryChanges
+    .filter((c) => c.unitCost > 0)
+    .map((c) => ({ inventoryItemId: c.inventoryItemId, cost: c.unitCost }));
+  if (costUpdates.length > 0) {
+    try {
+      const r = await updateInventoryItemCostsBatch(admin, costUpdates);
+      if (r.failures.length > 0) {
+        console.warn(
+          `Scan-to-receive COGS: ${r.updated} updated, ${r.skipped} skipped, ${r.failures.length} failed:`,
+          r.failures,
+        );
+      }
+    } catch (error) {
+      console.error("Scan-to-receive: COGS push failed (non-fatal)", error);
+    }
+  }
+
+  // DB state last, after Shopify has already accepted the changes.
   try {
     await receiveLineItems(po.id, changes);
     return json({
-      ok: true,
-      message:
-        "Received quantities saved. A manager will sync these to Shopify inventory on their next session.",
+      ok: true as const,
+      message: `Received ${withDeltas.length} line(s). Shopify inventory updated.`,
     });
   } catch (error) {
-    return json({ error: String(error) });
+    console.error("Scan-to-receive: PO DB update failed", error);
+    return json({
+      error: `Shopify updated but PO state save failed (please review in the admin): ${String(error)}`,
+    });
   }
 };
 

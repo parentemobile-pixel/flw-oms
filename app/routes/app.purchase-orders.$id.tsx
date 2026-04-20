@@ -5,6 +5,7 @@ import {
   useActionData,
   useFetcher,
   useLoaderData,
+  useNavigate,
   useNavigation,
   useSubmit,
 } from "@remix-run/react";
@@ -225,6 +226,7 @@ export default function PurchaseOrderDetail() {
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
+  const navigate = useNavigate();
   const navigation = useNavigation();
   const isSaving = navigation.state === "submitting";
 
@@ -622,7 +624,9 @@ export default function PurchaseOrderDetail() {
         return (
           <Button
             variant="primary"
-            url={`/app/purchase-orders/${po.id}/receive`}
+            onClick={() =>
+              navigate(`/app/purchase-orders/${po.id}/receive`)
+            }
           >
             Receive Items
           </Button>
@@ -631,7 +635,9 @@ export default function PurchaseOrderDetail() {
         return (
           <Button
             variant="primary"
-            url={`/app/purchase-orders/${po.id}/receive`}
+            onClick={() =>
+              navigate(`/app/purchase-orders/${po.id}/receive`)
+            }
           >
             Continue Receiving
           </Button>
