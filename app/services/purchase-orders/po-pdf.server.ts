@@ -12,6 +12,12 @@ interface POLineForPdf {
   quantityOrdered: number;
   quantityReceived: number;
   selectedOptions?: Array<{ name: string; value: string }>;
+  /** Pre-fetched product image as a data: URL. Null when the product has
+   *  no featuredImage or the image fetch failed. */
+  imageDataUrl?: string | null;
+  /** Value of the first product metafield whose key/namespace matches
+   *  /cutting/i. Null when the product doesn't have one. */
+  cuttingTicket?: string | null;
 }
 
 interface POForPdf {
@@ -163,13 +169,17 @@ function drawLineTable(
   margin: number,
   pageWidth: number,
 ): number {
+  // Line view gets a small (0.55") image column on the left so the vendor
+  // can visually verify each line at a glance.
+  const imgColW = 0.55;
   const cols = [
-    { title: "Product", width: 2.8 },
-    { title: "Variant", width: 1.4 },
-    { title: "SKU", width: 1.4 },
-    { title: "Qty", width: 0.6, align: "right" as const },
-    { title: "Cost", width: 0.8, align: "right" as const },
-    { title: "Line Total", width: 0.9, align: "right" as const },
+    { title: "", width: imgColW }, // image
+    { title: "Product", width: 2.4 },
+    { title: "Variant", width: 1.2 },
+    { title: "SKU", width: 1.2 },
+    { title: "Qty", width: 0.5, align: "right" as const },
+    { title: "Cost", width: 0.7, align: "right" as const },
+    { title: "Line Total", width: 0.85, align: "right" as const },
   ];
 
   let y = yStart + 0.2;
@@ -177,42 +187,91 @@ function drawLineTable(
   doc.setFont("helvetica", "bold");
   let x = margin;
   for (const c of cols) {
-    doc.text(c.title, c.align === "right" ? x + c.width - 0.05 : x, y, {
-      align: c.align,
-    });
+    if (c.title) {
+      doc.text(c.title, c.align === "right" ? x + c.width - 0.05 : x, y, {
+        align: c.align,
+      });
+    }
     x += c.width;
   }
   doc.setLineWidth(0.01);
   doc.line(margin, y + 0.07, pageWidth - margin, y + 0.07);
-  y += 0.2;
+  y += 0.15;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
+
+  // Row height: larger when a product has a thumbnail, to let the image be
+  // legible. Uniform height per page is easier for the vendor's eye.
+  const rowHeight = 0.55;
+
   for (const li of po.lineItems) {
-    if (y > 10.5) {
+    if (y > 10.3) {
       doc.addPage();
       y = 0.5;
     }
+    const rowTop = y;
     x = margin;
-    const vals = [
-      truncate(li.productTitle, 34),
+
+    // ── Image thumbnail ──
+    if (li.imageDataUrl) {
+      try {
+        const imgSize = 0.45;
+        const imgY = rowTop - 0.05;
+        doc.addImage(
+          li.imageDataUrl,
+          "PNG",
+          x + (imgColW - imgSize) / 2,
+          imgY,
+          imgSize,
+          imgSize,
+          undefined,
+          "FAST",
+        );
+      } catch {
+        // Thumbnail failure — skip silently
+      }
+    }
+    x += imgColW;
+
+    // ── Product cell (title + optional cutting ticket subtitle) ──
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.text(truncate(li.productTitle, 34), x, y);
+    if (li.cuttingTicket) {
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "italic");
+      doc.text(
+        `Cutting: ${truncate(li.cuttingTicket, 44)}`,
+        x,
+        y + 0.14,
+      );
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+    }
+    x += 2.4;
+
+    // ── Remaining cells ──
+    const trailing = [
       truncate(li.variantTitle, 22),
       li.sku || "—",
       String(li.quantityOrdered),
       `$${li.unitCost.toFixed(2)}`,
       `$${(li.unitCost * li.quantityOrdered).toFixed(2)}`,
     ];
-    for (let i = 0; i < cols.length; i++) {
-      const c = cols[i];
+    // Cols index 2..6 correspond to trailing[0..4]
+    for (let i = 0; i < trailing.length; i++) {
+      const c = cols[i + 2];
       doc.text(
-        vals[i],
+        trailing[i],
         c.align === "right" ? x + c.width - 0.05 : x,
         y,
         { align: c.align },
       );
       x += c.width;
     }
-    y += 0.18;
+
+    y = rowTop + rowHeight;
   }
 
   return y;
@@ -226,7 +285,9 @@ function drawGridTable(
   margin: number,
   pageWidth: number,
 ): number {
-  // Build grid: collect sizes, group by (product + non-size options)
+  // Build grid: collect sizes, group by (product + non-size options).
+  // Each row also tracks the product image + cutting ticket from the first
+  // line item seen (they're product-level, not variant-level).
   const sizeSet = new Set<string>();
   const rowMap = new Map<
     string,
@@ -234,6 +295,8 @@ function drawGridTable(
       label: string;
       cost: number;
       retail: number;
+      imageDataUrl: string | null;
+      cuttingTicket: string | null;
       bySize: Record<string, { ordered: number; received: number }>;
     }
   >();
@@ -256,6 +319,8 @@ function drawGridTable(
         label,
         cost: li.unitCost,
         retail: li.retailPrice,
+        imageDataUrl: li.imageDataUrl ?? null,
+        cuttingTicket: li.cuttingTicket ?? null,
         bySize: {},
       });
     }
@@ -289,13 +354,15 @@ function drawGridTable(
     return a.localeCompare(b);
   });
 
-  const productColWidth = 3.2;
+  const imgColW = 0.55;
+  const productColWidth = 2.7;
   const priceColWidth = 0.8;
   const totalColWidth = 0.8;
   const sizeColWidth = Math.max(
     0.5,
     (pageWidth -
       2 * margin -
+      imgColW -
       productColWidth -
       priceColWidth -
       totalColWidth) /
@@ -307,7 +374,7 @@ function drawGridTable(
   // Header
   doc.setFontSize(8);
   doc.setFont("helvetica", "bold");
-  let x = margin;
+  let x = margin + imgColW; // leave the image column blank in the header
   doc.text("Product", x, y);
   x += productColWidth;
   doc.text("Cost", x + priceColWidth - 0.05, y, { align: "right" });
@@ -319,23 +386,64 @@ function drawGridTable(
   doc.text("Total", x + totalColWidth - 0.05, y, { align: "right" });
   doc.setLineWidth(0.01);
   doc.line(margin, y + 0.07, pageWidth - margin, y + 0.07);
-  y += 0.2;
+  y += 0.15;
 
   // Rows
   doc.setFont("helvetica", "normal");
+  const rowHeight = 0.55;
+
   for (const row of rowMap.values()) {
-    if (y > 7.5) {
+    if (y > 7.2) {
       doc.addPage();
       y = 0.5;
     }
+    const rowTop = y;
     x = margin;
-    doc.text(truncate(row.label, 44), x, y);
+
+    // ── Image thumbnail ──
+    if (row.imageDataUrl) {
+      try {
+        const imgSize = 0.45;
+        doc.addImage(
+          row.imageDataUrl,
+          "PNG",
+          x + (imgColW - imgSize) / 2,
+          rowTop - 0.05,
+          imgSize,
+          imgSize,
+          undefined,
+          "FAST",
+        );
+      } catch {
+        // Skip on failure
+      }
+    }
+    x += imgColW;
+
+    // ── Product cell (title + optional cutting ticket subtitle) ──
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.text(truncate(row.label, 38), x, y);
+    if (row.cuttingTicket) {
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "italic");
+      doc.text(
+        `Cutting: ${truncate(row.cuttingTicket, 44)}`,
+        x,
+        y + 0.14,
+      );
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+    }
     x += productColWidth;
+
+    // ── Cost ──
     doc.text(`$${row.cost.toFixed(2)}`, x + priceColWidth - 0.05, y, {
       align: "right",
     });
     x += priceColWidth;
 
+    // ── Size cells ──
     let rowTotal = 0;
     for (const size of sizes) {
       const cell = row.bySize[size];
@@ -351,12 +459,15 @@ function drawGridTable(
       }
       x += sizeColWidth;
     }
+
+    // ── Row total ──
     doc.setFont("helvetica", "bold");
     doc.text(String(rowTotal), x + totalColWidth - 0.05, y, {
       align: "right",
     });
     doc.setFont("helvetica", "normal");
-    y += 0.18;
+
+    y = rowTop + rowHeight;
   }
 
   return y;

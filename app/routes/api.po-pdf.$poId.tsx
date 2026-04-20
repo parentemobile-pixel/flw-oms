@@ -51,6 +51,82 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     }
   }
 
+  // Fetch product featuredImage + metafields (for the "cutting ticket" field)
+  // for every unique product on the PO, in one batched GraphQL call.
+  const productIds = [
+    ...new Set(po.lineItems.map((li) => li.shopifyProductId)),
+  ];
+  const productMeta: Record<
+    string,
+    { imageUrl: string | null; cuttingTicket: string | null }
+  > = {};
+  if (productIds.length > 0) {
+    try {
+      const q = `#graphql
+        query POProductMeta($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              featuredImage { url }
+              metafields(first: 50) {
+                edges {
+                  node { namespace key value type }
+                }
+              }
+            }
+          }
+        }
+      `;
+      const resp = await admin.graphql(q, { variables: { ids: productIds } });
+      const data = (await resp.json()) as any;
+      for (const node of data.data?.nodes ?? []) {
+        if (!node?.id) continue;
+        // Cutting ticket: any metafield whose namespace or key contains
+        // "cutting". First match wins. Supports various merchant naming.
+        let cuttingTicket: string | null = null;
+        for (const edge of node.metafields?.edges ?? []) {
+          const { namespace, key, value } = edge.node;
+          const hay = `${namespace}.${key}`.toLowerCase();
+          if (hay.includes("cutting")) {
+            cuttingTicket = value ?? null;
+            break;
+          }
+        }
+        productMeta[node.id] = {
+          imageUrl: node.featuredImage?.url ?? null,
+          cuttingTicket,
+        };
+      }
+    } catch (e) {
+      console.warn("PO PDF: product metadata fetch failed", e);
+    }
+  }
+
+  // Fetch each unique image as base64 so jsPDF can embed it. Best-effort —
+  // a missing/slow image just means the row renders without a thumbnail.
+  const uniqueImageUrls = [
+    ...new Set(
+      Object.values(productMeta)
+        .map((m) => m.imageUrl)
+        .filter((u): u is string => !!u),
+    ),
+  ];
+  const imageDataUrls: Record<string, string> = {};
+  await Promise.all(
+    uniqueImageUrls.map(async (imgUrl) => {
+      try {
+        const r = await fetch(imgUrl);
+        if (!r.ok) return;
+        const buf = Buffer.from(await r.arrayBuffer());
+        const contentType = r.headers.get("content-type") || "image/png";
+        const mime = contentType.split(";")[0].trim();
+        imageDataUrls[imgUrl] = `data:${mime};base64,${buf.toString("base64")}`;
+      } catch {
+        // Skip this image; the row will just render without a thumb.
+      }
+    }),
+  );
+
   const lineItems = po.lineItems.map((li) => {
     let options = variantOptions[li.shopifyVariantId];
     if (!options && view === "grid") {
@@ -75,9 +151,14 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         value: p,
       }));
     }
+    const meta = productMeta[li.shopifyProductId];
     return {
       ...li,
       selectedOptions: options,
+      imageDataUrl: meta?.imageUrl
+        ? imageDataUrls[meta.imageUrl] ?? null
+        : null,
+      cuttingTicket: meta?.cuttingTicket ?? null,
     };
   });
 
