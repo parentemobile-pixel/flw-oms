@@ -459,6 +459,63 @@ clicking into each one in the Shopify admin.
 
 **Rough estimate:** 2–3 build days after V2 ships.
 
+### Reports module — "Reports" dashboard
+A dedicated screen (or set of screens under `/app/reports`) for the
+business-level views the merchandising team cares about — the stuff
+that Planning doesn't cover because Planning is focused on what to
+re-order, not what's happening with what's already in stock.
+
+**Use cases the user called out:**
+- Stock on hand report — units + $ value, broken down by location,
+  vendor, tag (season/brand), and product/variant.
+- Inventory turnover — classic retail metric (`COGS / avg inventory`).
+  Computed per SKU, per vendor, per season, and at the whole-store
+  level. Needs a trailing 12-month window.
+- Inventory value — total $ tied up in stock at cost, and the retail
+  value if fully sold through. Key for loan applications and quarterly
+  business reviews.
+
+**Also worth building (natural extensions of the same data pipeline):**
+- Sell-through % — received vs. sold within a window, per product /
+  season. The "how much of FW25 did we actually move" view.
+- Aging — days-in-stock distribution, flags slow movers (> 180 days).
+- Weeks of supply — current stock ÷ recent sales velocity, surfaces
+  products about to run out.
+- Top sellers / dead stock ranked lists with tag + vendor filters.
+- Gross margin by product / category based on unit cost + sold price.
+- Shrinkage report — aggregate of `InventoryAdjustmentSession`
+  entries with reason=shrinkage, grouped by location.
+- Stock count variance trend — from completed stock counts, the
+  $ and % variance over time. Flags whether inventory accuracy is
+  improving or getting worse.
+
+**Schema additions:**
+- `InventoryValueSnapshot` — nightly snapshot of total units + $ cost
+  value + $ retail value per (shop, locationId, optional vendor
+  grouping). Needed to compute *average* inventory for turnover math,
+  which otherwise would have to be guessed.
+- No changes to sales data — already captured in `SalesSnapshot`.
+
+**Data pipeline:**
+- Reuse the sales sync we built for Planning.
+- New nightly cron appended to the planning rebuild: walks all variants,
+  fetches current per-location inventory via `getVariantsInventory`,
+  computes cost × qty + retail × qty, writes an
+  `InventoryValueSnapshot` row per (location, vendor-bucket).
+
+**UI shape (proposed, not committed):**
+- `/app/reports` — index with cards for each report, each opening a
+  dedicated child route.
+- Date-range picker at the top of every report (defaults to trailing
+  30/90/365 depending on the metric).
+- Filters shared across reports: location(s), vendor(s), tag(s).
+- Every report has an "Export CSV" action — this team will want the
+  data in Excel for ad-hoc analysis.
+
+**Rough estimate:** 3–5 build days after V2 ships, assuming the
+InventoryValueSnapshot cron is the new cost; the rest is charts +
+tables over existing data.
+
 ### Also parked
 - **Vendor PO PDF import** — drag-drop a PDF → Claude extracts line items →
   prefill a draft PO (mentioned in Shopify AI tooling section).
