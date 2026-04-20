@@ -232,11 +232,16 @@ export default function ReceivePurchaseOrder() {
   const [locationId, setLocationId] = useState<string | null>(
     defaultLocationId,
   );
+  // Autofill with the ordered amount — the common case is "receiving
+  // everything that was ordered". Users can -/+ down to reflect actual
+  // counts. For lines that were already partially received, initial value
+  // is still ordered; the action computes the delta so no double-adjust.
   const [quantities, setQuantities] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {};
-    for (const li of po.lineItems) initial[li.id] = li.quantityReceived;
+    for (const li of po.lineItems) initial[li.id] = li.quantityOrdered;
     return initial;
   });
+  const [viewMode, setViewMode] = useState<"line" | "grid">("grid");
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
 
   // Lookup table for scan-to-line mode: sku/barcode → lineItemId
@@ -278,14 +283,28 @@ export default function ReceivePurchaseOrder() {
   );
 
   const handleQuantityChange = useCallback(
-    (lineItemId: string, value: string) => {
+    (lineItemId: string, value: number) => {
       setQuantities((prev) => ({
         ...prev,
-        [lineItemId]: Math.max(0, parseInt(value, 10) || 0),
+        [lineItemId]: Math.max(0, value),
       }));
     },
     [],
   );
+
+  const handleIncrement = useCallback((lineItemId: string) => {
+    setQuantities((prev) => ({
+      ...prev,
+      [lineItemId]: (prev[lineItemId] ?? 0) + 1,
+    }));
+  }, []);
+
+  const handleDecrement = useCallback((lineItemId: string) => {
+    setQuantities((prev) => ({
+      ...prev,
+      [lineItemId]: Math.max(0, (prev[lineItemId] ?? 0) - 1),
+    }));
+  }, []);
 
   const handleReceiveAll = useCallback(() => {
     const allReceived: Record<string, number> = {};
@@ -295,9 +314,25 @@ export default function ReceivePurchaseOrder() {
 
   const handleReceiveNone = useCallback(() => {
     const reset: Record<string, number> = {};
-    for (const li of po.lineItems) reset[li.id] = li.quantityReceived;
+    for (const li of po.lineItems) reset[li.id] = 0;
     setQuantities(reset);
   }, [po.lineItems]);
+
+  // "Mark row received" — sets every line item in a given (product +
+  // non-size) grouping to its ordered quantity.
+  const handleMarkLinesReceived = useCallback(
+    (lineItemIds: string[]) => {
+      setQuantities((prev) => {
+        const next = { ...prev };
+        for (const id of lineItemIds) {
+          const li = po.lineItems.find((l) => l.id === id);
+          if (li) next[id] = li.quantityOrdered;
+        }
+        return next;
+      });
+    },
+    [po.lineItems],
+  );
 
   const handleSubmit = useCallback(() => {
     const receivedItems: ReceiveItem[] = po.lineItems.map((li) => ({
@@ -415,106 +450,50 @@ export default function ReceivePurchaseOrder() {
           </Card>
         </Layout.Section>
 
-        {/* Line items */}
+        {/* Line items — grid or line view */}
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
-              <Text as="h2" variant="headingMd">
-                Line Items
-              </Text>
-              <div style={{ overflowX: "auto" }}>
-                <table
-                  style={{
-                    width: "100%",
-                    borderCollapse: "collapse",
-                    fontSize: "13px",
-                  }}
-                >
-                  <thead>
-                    <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-                      <th style={{ padding: "8px", textAlign: "left" }}>
-                        Product
-                      </th>
-                      <th style={{ padding: "8px", textAlign: "left" }}>
-                        Variant
-                      </th>
-                      <th style={{ padding: "8px", textAlign: "left" }}>
-                        SKU
-                      </th>
-                      <th style={{ padding: "8px", textAlign: "right" }}>
-                        Ordered
-                      </th>
-                      <th style={{ padding: "8px", textAlign: "right" }}>
-                        Previously
-                      </th>
-                      <th
-                        style={{
-                          padding: "8px",
-                          textAlign: "right",
-                          width: "110px",
-                        }}
-                      >
-                        Received
-                      </th>
-                      <th style={{ padding: "8px", textAlign: "center" }}>
-                        Status
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {po.lineItems.map((li) => {
-                      const currentQty = quantities[li.id] ?? 0;
-                      const isComplete = currentQty >= li.quantityOrdered;
-                      const isPartial =
-                        currentQty > 0 && currentQty < li.quantityOrdered;
-
-                      return (
-                        <tr
-                          key={li.id}
-                          style={{ borderBottom: "1px solid #f1f1f1" }}
-                        >
-                          <td style={{ padding: "8px" }}>{li.productTitle}</td>
-                          <td style={{ padding: "8px" }}>{li.variantTitle}</td>
-                          <td style={{ padding: "8px" }}>{li.sku || "—"}</td>
-                          <td
-                            style={{ padding: "8px", textAlign: "right" }}
-                          >
-                            {li.quantityOrdered}
-                          </td>
-                          <td
-                            style={{ padding: "8px", textAlign: "right" }}
-                          >
-                            {li.quantityReceived}
-                          </td>
-                          <td style={{ padding: "4px 8px" }}>
-                            <TextField
-                              label="Received"
-                              labelHidden
-                              value={String(currentQty)}
-                              onChange={(val) =>
-                                handleQuantityChange(li.id, val)
-                              }
-                              type="number"
-                              min={0}
-                              max={li.quantityOrdered}
-                              autoComplete="off"
-                            />
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "center" }}>
-                            {isComplete ? (
-                              <Badge tone="success">Complete</Badge>
-                            ) : isPartial ? (
-                              <Badge tone="warning">Partial</Badge>
-                            ) : (
-                              <Badge>Pending</Badge>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="h2" variant="headingMd">
+                  Line Items
+                </Text>
+                <ButtonGroup variant="segmented">
+                  <Button
+                    pressed={viewMode === "line"}
+                    onClick={() => setViewMode("line")}
+                    size="slim"
+                  >
+                    Line Items
+                  </Button>
+                  <Button
+                    pressed={viewMode === "grid"}
+                    onClick={() => setViewMode("grid")}
+                    size="slim"
+                  >
+                    Size Grid
+                  </Button>
+                </ButtonGroup>
+              </InlineStack>
+              {viewMode === "grid" ? (
+                <POReceiveGrid
+                  lineItems={po.lineItems}
+                  quantities={quantities}
+                  onQuantityChange={handleQuantityChange}
+                  onIncrement={handleIncrement}
+                  onDecrement={handleDecrement}
+                  onMarkRowReceived={handleMarkLinesReceived}
+                />
+              ) : (
+                <POReceiveLine
+                  lineItems={po.lineItems}
+                  quantities={quantities}
+                  onQuantityChange={handleQuantityChange}
+                  onIncrement={handleIncrement}
+                  onDecrement={handleDecrement}
+                  onMarkRowReceived={handleMarkLinesReceived}
+                />
+              )}
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -538,5 +517,390 @@ export default function ReceivePurchaseOrder() {
         </Layout.Section>
       </Layout>
     </Page>
+  );
+}
+
+// ─── Helpers & sub-components ──────────────────────────────────────────────
+
+const SIZE_TOKENS = new Set([
+  "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL",
+  "OS", "ONE SIZE",
+]);
+const SIZE_SORT_ORDER = [
+  "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL",
+  "OS", "ONE SIZE",
+];
+
+interface ReceiveLine {
+  id: string;
+  shopifyProductId: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  quantityOrdered: number;
+  quantityReceived: number;
+}
+
+function classifyVariant(variantTitle: string): {
+  size: string | null;
+  nonSize: string;
+} {
+  if (/^default title$/i.test(variantTitle.trim())) {
+    return { size: null, nonSize: "" };
+  }
+  const parts = variantTitle.split(" / ").map((p) => p.trim()).filter(Boolean);
+  let size: string | null = null;
+  const nonSize: string[] = [];
+  for (const p of parts) {
+    if (!size && SIZE_TOKENS.has(p.toUpperCase())) size = p;
+    else nonSize.push(p);
+  }
+  return { size, nonSize: nonSize.join(" / ") };
+}
+
+function compareSizes(a: string, b: string): number {
+  const ai = SIZE_SORT_ORDER.indexOf(a.toUpperCase());
+  const bi = SIZE_SORT_ORDER.indexOf(b.toUpperCase());
+  if (ai !== -1 && bi !== -1) return ai - bi;
+  if (ai !== -1) return -1;
+  if (bi !== -1) return 1;
+  return a.localeCompare(b);
+}
+
+/**
+ * +/- counter: big tap targets so a warehouse person can count items
+ * without typing. Keeps the current value in a small read-only
+ * TextField between the buttons so users can see the number clearly.
+ */
+function QtyStepper({
+  value,
+  max,
+  onDecrement,
+  onIncrement,
+  onChange,
+}: {
+  value: number;
+  max: number;
+  onDecrement: () => void;
+  onIncrement: () => void;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <InlineStack gap="100" blockAlign="center" wrap={false}>
+      <Button
+        onClick={onDecrement}
+        disabled={value <= 0}
+        accessibilityLabel="Decrement"
+        size="slim"
+      >
+        −
+      </Button>
+      <div style={{ width: "56px" }}>
+        <TextField
+          label="Qty"
+          labelHidden
+          type="number"
+          value={String(value)}
+          onChange={(val) => onChange(parseInt(val, 10) || 0)}
+          autoComplete="off"
+          align="center"
+          min={0}
+        />
+      </div>
+      <Button
+        onClick={onIncrement}
+        accessibilityLabel="Increment"
+        size="slim"
+      >
+        +
+      </Button>
+      <Text as="span" variant="bodySm" tone="subdued">
+        / {max}
+      </Text>
+    </InlineStack>
+  );
+}
+
+// ─── Line view (flat table) ────────────────────────────────────────────────
+
+function POReceiveLine({
+  lineItems,
+  quantities,
+  onQuantityChange,
+  onIncrement,
+  onDecrement,
+  onMarkRowReceived,
+}: {
+  lineItems: ReceiveLine[];
+  quantities: Record<string, number>;
+  onQuantityChange: (id: string, v: number) => void;
+  onIncrement: (id: string) => void;
+  onDecrement: (id: string) => void;
+  onMarkRowReceived: (ids: string[]) => void;
+}) {
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: "13px",
+        }}
+      >
+        <thead>
+          <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
+            <th style={{ padding: "8px", textAlign: "left" }}>Product</th>
+            <th style={{ padding: "8px", textAlign: "left" }}>Variant</th>
+            <th style={{ padding: "8px", textAlign: "left" }}>SKU</th>
+            <th style={{ padding: "8px", textAlign: "right" }}>Ordered</th>
+            <th style={{ padding: "8px", textAlign: "right" }}>Previously</th>
+            <th style={{ padding: "8px" }}>Receive now</th>
+            <th style={{ padding: "8px" }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {lineItems.map((li) => {
+            const currentQty = quantities[li.id] ?? 0;
+            const isComplete = currentQty >= li.quantityOrdered;
+            return (
+              <tr key={li.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
+                <td style={{ padding: "8px" }}>{li.productTitle}</td>
+                <td style={{ padding: "8px" }}>{li.variantTitle}</td>
+                <td style={{ padding: "8px" }}>{li.sku || "—"}</td>
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  {li.quantityOrdered}
+                </td>
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  {li.quantityReceived}
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <QtyStepper
+                    value={currentQty}
+                    max={li.quantityOrdered}
+                    onDecrement={() => onDecrement(li.id)}
+                    onIncrement={() => onIncrement(li.id)}
+                    onChange={(v) => onQuantityChange(li.id, v)}
+                  />
+                </td>
+                <td style={{ padding: "8px" }}>
+                  {isComplete ? (
+                    <Badge tone="success">Received</Badge>
+                  ) : (
+                    <Button
+                      size="slim"
+                      onClick={() => onMarkRowReceived([li.id])}
+                    >
+                      Mark received
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Grid view (sizes as columns, "Mark row received" per color group) ────
+
+function POReceiveGrid({
+  lineItems,
+  quantities,
+  onQuantityChange,
+  onIncrement,
+  onDecrement,
+  onMarkRowReceived,
+}: {
+  lineItems: ReceiveLine[];
+  quantities: Record<string, number>;
+  onQuantityChange: (id: string, v: number) => void;
+  onIncrement: (id: string) => void;
+  onDecrement: (id: string) => void;
+  onMarkRowReceived: (ids: string[]) => void;
+}) {
+  const sizeSet = new Set<string>();
+  const groups = new Map<
+    string,
+    {
+      productTitle: string;
+      nonSize: string;
+      noSize: boolean;
+      lineItemIds: string[];
+      bySize: Record<string, ReceiveLine>;
+    }
+  >();
+
+  for (const li of lineItems) {
+    const { size, nonSize } = classifyVariant(li.variantTitle);
+    const key = `${li.shopifyProductId}::${nonSize}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        productTitle: li.productTitle,
+        nonSize,
+        noSize: !size,
+        lineItemIds: [],
+        bySize: {},
+      });
+    }
+    const g = groups.get(key)!;
+    g.lineItemIds.push(li.id);
+    if (size) {
+      sizeSet.add(size);
+      g.bySize[size] = li;
+    } else {
+      g.bySize["_single"] = li;
+    }
+  }
+
+  const sortedSizes = [...sizeSet].sort(compareSizes);
+  const sizeColCount = Math.max(sortedSizes.length, 1);
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: "13px",
+        }}
+      >
+        <thead>
+          <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "left",
+                minWidth: "240px",
+              }}
+            >
+              Product / Variant
+            </th>
+            {sortedSizes.length > 0 ? (
+              sortedSizes.map((s) => (
+                <th
+                  key={s}
+                  style={{
+                    padding: "8px",
+                    textAlign: "center",
+                    minWidth: "150px",
+                  }}
+                >
+                  {s}
+                </th>
+              ))
+            ) : (
+              <th style={{ padding: "8px", textAlign: "center" }}>Qty</th>
+            )}
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "right",
+                minWidth: "140px",
+              }}
+            ></th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...groups.entries()].map(([key, g]) => {
+            const allReceived = g.lineItemIds.every((id) => {
+              const li = lineItems.find((l) => l.id === id);
+              if (!li) return true;
+              return (quantities[id] ?? 0) >= li.quantityOrdered;
+            });
+            return (
+              <tr key={key} style={{ borderBottom: "1px solid #f1f1f1" }}>
+                <td style={{ padding: "8px", verticalAlign: "top" }}>
+                  <div style={{ fontWeight: 500 }}>{g.productTitle}</div>
+                  {g.nonSize && (
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      {g.nonSize}
+                    </Text>
+                  )}
+                </td>
+                {g.noSize ? (
+                  <td
+                    colSpan={sizeColCount}
+                    style={{ padding: "8px", verticalAlign: "top" }}
+                  >
+                    {(() => {
+                      const li = g.bySize["_single"];
+                      if (!li) return "—";
+                      return (
+                        <QtyStepper
+                          value={quantities[li.id] ?? 0}
+                          max={li.quantityOrdered}
+                          onDecrement={() => onDecrement(li.id)}
+                          onIncrement={() => onIncrement(li.id)}
+                          onChange={(v) => onQuantityChange(li.id, v)}
+                        />
+                      );
+                    })()}
+                  </td>
+                ) : (
+                  sortedSizes.map((s) => {
+                    const li = g.bySize[s];
+                    if (!li) {
+                      return (
+                        <td
+                          key={s}
+                          style={{
+                            padding: "8px",
+                            textAlign: "center",
+                            background: "#f9f9f9",
+                            color: "#9ca3af",
+                          }}
+                        >
+                          —
+                        </td>
+                      );
+                    }
+                    return (
+                      <td
+                        key={s}
+                        style={{ padding: "4px 8px", verticalAlign: "top" }}
+                      >
+                        <QtyStepper
+                          value={quantities[li.id] ?? 0}
+                          max={li.quantityOrdered}
+                          onDecrement={() => onDecrement(li.id)}
+                          onIncrement={() => onIncrement(li.id)}
+                          onChange={(v) => onQuantityChange(li.id, v)}
+                        />
+                        {li.quantityReceived > 0 && (
+                          <div
+                            style={{
+                              fontSize: "11px",
+                              color: "#6b7280",
+                              textAlign: "center",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {li.quantityReceived} prev
+                          </div>
+                        )}
+                      </td>
+                    );
+                  })
+                )}
+                <td style={{ padding: "8px", verticalAlign: "top" }}>
+                  {allReceived ? (
+                    <Badge tone="success">All received</Badge>
+                  ) : (
+                    <Button
+                      size="slim"
+                      onClick={() => onMarkRowReceived(g.lineItemIds)}
+                    >
+                      Mark row received
+                    </Button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

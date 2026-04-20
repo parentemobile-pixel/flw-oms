@@ -261,9 +261,11 @@ export default function ScanReceivePage() {
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
 
+  // Default to ordered quantity — typical receive is "everything arrived".
+  // Counter walks down from the full amount for missing/damaged items.
   const [quantities, setQuantities] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
-    for (const li of po.lineItems) init[li.id] = li.quantityReceived;
+    for (const li of po.lineItems) init[li.id] = li.quantityOrdered;
     return init;
   });
 
@@ -320,6 +322,47 @@ export default function ScanReceivePage() {
     [],
   );
 
+  const handleIncrement = useCallback((lineItemId: string) => {
+    setQuantities((prev) => ({
+      ...prev,
+      [lineItemId]: (prev[lineItemId] ?? 0) + 1,
+    }));
+  }, []);
+
+  const handleDecrement = useCallback((lineItemId: string) => {
+    setQuantities((prev) => ({
+      ...prev,
+      [lineItemId]: Math.max(0, (prev[lineItemId] ?? 0) - 1),
+    }));
+  }, []);
+
+  const handleMarkAllReceived = useCallback(() => {
+    setQuantities((prev) => {
+      const next = { ...prev };
+      for (const li of po.lineItems) next[li.id] = li.quantityOrdered;
+      return next;
+    });
+  }, [po.lineItems]);
+
+  const handleMarkLineReceived = useCallback(
+    (lineItemId: string) => {
+      setQuantities((prev) => {
+        const li = po.lineItems.find((l) => l.id === lineItemId);
+        if (!li) return prev;
+        return { ...prev, [lineItemId]: li.quantityOrdered };
+      });
+    },
+    [po.lineItems],
+  );
+
+  const handleClearAll = useCallback(() => {
+    setQuantities((prev) => {
+      const next = { ...prev };
+      for (const li of po.lineItems) next[li.id] = 0;
+      return next;
+    });
+  }, [po.lineItems]);
+
   const handleSubmit = useCallback(() => {
     const changes = po.lineItems.map((li) => ({
       lineItemId: li.id,
@@ -360,16 +403,24 @@ export default function ScanReceivePage() {
           <Layout.Section>
             <Card>
               <BlockStack gap="300">
-                <InlineStack gap="200">
-                  <Badge>{po.status}</Badge>
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    {receivedNow} / {totalOrdered} units
-                  </Text>
+                <InlineStack align="space-between" blockAlign="center" wrap>
+                  <InlineStack gap="200" blockAlign="center">
+                    <Badge>{po.status}</Badge>
+                    <Text as="span" variant="bodyMd">
+                      {receivedNow} / {totalOrdered} units
+                    </Text>
+                  </InlineStack>
+                  <ButtonGroup>
+                    <Button onClick={handleMarkAllReceived}>
+                      Mark all received
+                    </Button>
+                    <Button onClick={handleClearAll}>Clear</Button>
+                  </ButtonGroup>
                 </InlineStack>
                 <Text as="p" variant="bodySm" tone="subdued">
-                  Scan items or enter quantities below. Save when done — a
-                  manager will sync counts to Shopify inventory from the admin
-                  app.
+                  Each line starts at the ordered quantity. Use − / + to
+                  deduct missing or damaged units, or tap &ldquo;Mark
+                  received&rdquo; per line. Save when done to sync Shopify.
                 </Text>
               </BlockStack>
             </Card>
@@ -417,51 +468,85 @@ export default function ScanReceivePage() {
                 </Text>
                 {po.lineItems.map((li) => {
                   const currentQty =
-                    quantities[li.id] ?? li.quantityReceived;
+                    quantities[li.id] ?? li.quantityOrdered;
+                  const isFull = currentQty >= li.quantityOrdered;
                   return (
                     <div
                       key={li.id}
                       style={{
-                        padding: "12px",
-                        borderRadius: "6px",
-                        border: "1px solid #e1e3e5",
+                        padding: "14px",
+                        borderRadius: "8px",
+                        border: isFull
+                          ? "2px solid #b7e3c7"
+                          : "1px solid #e1e3e5",
+                        background: isFull ? "#f3faf6" : undefined,
                       }}
                     >
-                      <BlockStack gap="200">
-                        <Text as="p" variant="bodyMd" fontWeight="medium">
-                          {li.productTitle}
-                        </Text>
-                        <Text as="p" variant="bodySm" tone="subdued">
-                          {li.variantTitle}
-                          {li.sku ? ` · ${li.sku}` : ""}
-                        </Text>
+                      <BlockStack gap="300">
+                        <InlineStack align="space-between" blockAlign="start">
+                          <BlockStack gap="050">
+                            <Text as="p" variant="bodyLg" fontWeight="semibold">
+                              {li.productTitle}
+                            </Text>
+                            <Text as="p" variant="bodySm" tone="subdued">
+                              {li.variantTitle}
+                              {li.sku ? ` · ${li.sku}` : ""}
+                            </Text>
+                          </BlockStack>
+                          {isFull && (
+                            <Badge tone="success">Received</Badge>
+                          )}
+                        </InlineStack>
+
+                        {/* Big +/- counter row */}
                         <InlineStack
                           align="space-between"
                           blockAlign="center"
+                          wrap={false}
                         >
-                          <Text as="span" variant="bodySm">
-                            Received / ordered
-                          </Text>
-                          <InlineStack gap="200" blockAlign="center">
-                            <div style={{ width: "80px" }}>
-                              <TextField
-                                label=""
-                                labelHidden
-                                value={String(currentQty)}
-                                onChange={(val) =>
-                                  handleQuantityChange(li.id, val)
-                                }
-                                type="number"
-                                min={0}
-                                max={li.quantityOrdered}
-                                autoComplete="off"
-                              />
-                            </div>
-                            <Text as="span" variant="bodySm">
+                          <Button
+                            size="large"
+                            onClick={() => handleDecrement(li.id)}
+                            disabled={currentQty <= 0}
+                            accessibilityLabel="Decrement"
+                          >
+                            −
+                          </Button>
+                          <InlineStack
+                            gap="200"
+                            blockAlign="baseline"
+                            align="center"
+                          >
+                            <Text
+                              as="span"
+                              variant="heading2xl"
+                              fontWeight="bold"
+                            >
+                              {currentQty}
+                            </Text>
+                            <Text as="span" variant="bodyMd" tone="subdued">
                               / {li.quantityOrdered}
                             </Text>
                           </InlineStack>
+                          <Button
+                            size="large"
+                            onClick={() => handleIncrement(li.id)}
+                            accessibilityLabel="Increment"
+                            variant="primary"
+                          >
+                            +
+                          </Button>
                         </InlineStack>
+
+                        {/* Per-line "Mark received" shortcut */}
+                        {!isFull && (
+                          <Button
+                            fullWidth
+                            onClick={() => handleMarkLineReceived(li.id)}
+                          >
+                            Mark all {li.quantityOrdered} received
+                          </Button>
+                        )}
                       </BlockStack>
                     </div>
                   );
