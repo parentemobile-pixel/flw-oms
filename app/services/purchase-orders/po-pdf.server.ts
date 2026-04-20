@@ -135,12 +135,8 @@ export async function generatePOPdf(options: {
     (sum, li) => sum + li.quantityOrdered,
     0,
   );
-  const totalRetail = po.lineItems.reduce(
-    (sum, li) => sum + li.retailPrice * li.quantityOrdered,
-    0,
-  );
   doc.text(
-    `Total units: ${totalUnits}     Total cost: $${po.totalCost.toFixed(2)}     Total retail: $${totalRetail.toFixed(2)}`,
+    `Total units: ${totalUnits}     Total cost: $${po.totalCost.toFixed(2)}`,
     margin,
     y,
   );
@@ -168,13 +164,12 @@ function drawLineTable(
   pageWidth: number,
 ): number {
   const cols = [
-    { title: "Product", width: 2.4 },
-    { title: "Variant", width: 1.2 },
-    { title: "SKU", width: 1.2 },
-    { title: "Qty", width: 0.5, align: "right" as const },
-    { title: "Cost", width: 0.7, align: "right" as const },
-    { title: "Retail", width: 0.7, align: "right" as const },
-    { title: "Line Total", width: 0.8, align: "right" as const },
+    { title: "Product", width: 2.8 },
+    { title: "Variant", width: 1.4 },
+    { title: "SKU", width: 1.4 },
+    { title: "Qty", width: 0.6, align: "right" as const },
+    { title: "Cost", width: 0.8, align: "right" as const },
+    { title: "Line Total", width: 0.9, align: "right" as const },
   ];
 
   let y = yStart + 0.2;
@@ -200,12 +195,11 @@ function drawLineTable(
     }
     x = margin;
     const vals = [
-      truncate(li.productTitle, 28),
-      truncate(li.variantTitle, 18),
+      truncate(li.productTitle, 34),
+      truncate(li.variantTitle, 22),
       li.sku || "—",
       String(li.quantityOrdered),
       `$${li.unitCost.toFixed(2)}`,
-      `$${li.retailPrice.toFixed(2)}`,
       `$${(li.unitCost * li.quantityOrdered).toFixed(2)}`,
     ];
     for (let i = 0; i < cols.length; i++) {
@@ -295,15 +289,16 @@ function drawGridTable(
     return a.localeCompare(b);
   });
 
-  const productColWidth = 3.0;
-  const priceColWidth = 0.7;
+  const productColWidth = 3.2;
+  const priceColWidth = 0.8;
+  const totalColWidth = 0.8;
   const sizeColWidth = Math.max(
     0.5,
     (pageWidth -
       2 * margin -
       productColWidth -
-      priceColWidth * 2 -
-      0.8) /
+      priceColWidth -
+      totalColWidth) /
       Math.max(sizes.length, 1),
   );
 
@@ -317,13 +312,11 @@ function drawGridTable(
   x += productColWidth;
   doc.text("Cost", x + priceColWidth - 0.05, y, { align: "right" });
   x += priceColWidth;
-  doc.text("Retail", x + priceColWidth - 0.05, y, { align: "right" });
-  x += priceColWidth;
   for (const size of sizes) {
     doc.text(size, x + sizeColWidth / 2, y, { align: "center" });
     x += sizeColWidth;
   }
-  doc.text("Total", x + 0.75, y, { align: "right" });
+  doc.text("Total", x + totalColWidth - 0.05, y, { align: "right" });
   doc.setLineWidth(0.01);
   doc.line(margin, y + 0.07, pageWidth - margin, y + 0.07);
   y += 0.2;
@@ -336,13 +329,9 @@ function drawGridTable(
       y = 0.5;
     }
     x = margin;
-    doc.text(truncate(row.label, 40), x, y);
+    doc.text(truncate(row.label, 44), x, y);
     x += productColWidth;
     doc.text(`$${row.cost.toFixed(2)}`, x + priceColWidth - 0.05, y, {
-      align: "right",
-    });
-    x += priceColWidth;
-    doc.text(`$${row.retail.toFixed(2)}`, x + priceColWidth - 0.05, y, {
       align: "right",
     });
     x += priceColWidth;
@@ -363,7 +352,9 @@ function drawGridTable(
       x += sizeColWidth;
     }
     doc.setFont("helvetica", "bold");
-    doc.text(String(rowTotal), x + 0.75, y, { align: "right" });
+    doc.text(String(rowTotal), x + totalColWidth - 0.05, y, {
+      align: "right",
+    });
     doc.setFont("helvetica", "normal");
     y += 0.18;
   }

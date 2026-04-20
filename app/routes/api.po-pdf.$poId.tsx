@@ -109,7 +109,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     status: 200,
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `inline; filename="${po.poNumber}-${view}.pdf"`,
+      // attachment so the browser downloads rather than tries to render inline
+      // in a new tab (which loses the Shopify admin session and produces the
+      // "requires refresh" weirdness users were hitting).
+      "Content-Disposition": `attachment; filename="${po.poNumber}-${view}.pdf"`,
     },
   });
 };

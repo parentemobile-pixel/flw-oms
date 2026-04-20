@@ -435,50 +435,104 @@ export default function PurchaseOrderDetail() {
     submit,
   ]);
 
-  // Print labels: fetch the PDF inside the authenticated iframe context
-  // (a top-level navigation to /api/labels/:poId in a new tab loses the
-  // Shopify admin session and returns nothing). Then trigger a blob
-  // download so the user gets a file they can open + print.
-  const [isGeneratingLabels, setIsGeneratingLabels] = useState(false);
-  const handlePrintLabels = useCallback(async () => {
-    if (isGeneratingLabels) return;
-    setIsGeneratingLabels(true);
-    try {
-      const response = await fetch(`/api/labels/${po.id}`);
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(
-          `Label endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+  // ── PDF / label downloads ────────────────────────────────────────────
+  // All PDF downloads fetch inside the authenticated iframe and trigger a
+  // blob download. A top-level navigation to the API endpoint (what we used
+  // to do via secondary action urls) opens a new tab without the Shopify
+  // admin session token, which is why users were seeing "opens a new page
+  // and nothing happens" or "have to refresh after generating."
+  const [isGenerating, setIsGenerating] = useState<
+    null | "labels" | "pdf-line" | "pdf-grid"
+  >(null);
+  const [lastDownload, setLastDownload] = useState<{
+    label: string;
+    filename: string;
+  } | null>(null);
+
+  const downloadBlob = useCallback(
+    async (opts: {
+      url: string;
+      filename: string;
+      label: string;
+      kind: "labels" | "pdf-line" | "pdf-grid";
+      emptyMessage?: string;
+    }) => {
+      if (isGenerating !== null) return;
+      setIsGenerating(opts.kind);
+      try {
+        const response = await fetch(opts.url);
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(
+            `${opts.label} endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+          );
+        }
+        const blob = await response.blob();
+        if (blob.size === 0) {
+          throw new Error(
+            opts.emptyMessage ?? "Generated PDF was empty.",
+          );
+        }
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objUrl;
+        a.download = opts.filename;
+        a.rel = "noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+        setLastDownload({ label: opts.label, filename: opts.filename });
+      } catch (error) {
+        console.error(`${opts.label} failed:`, error);
+        window.alert(
+          `Couldn't generate ${opts.label.toLowerCase()}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
+      } finally {
+        setIsGenerating(null);
       }
-      const blob = await response.blob();
-      if (blob.size === 0) {
-        throw new Error(
+    },
+    [isGenerating],
+  );
+
+  const handlePrintLabels = useCallback(
+    () =>
+      downloadBlob({
+        url: `/api/labels/${po.id}`,
+        filename: `labels-${po.poNumber}.pdf`,
+        label: "Labels",
+        kind: "labels",
+        emptyMessage:
           "Generated PDF was empty. Check that line items have SKUs or barcodes.",
-        );
-      }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `labels-${po.poNumber}.pdf`;
-      a.rel = "noreferrer";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // Revoke after the click+download has been handed off to the browser.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      console.error("Print labels failed:", error);
-      // Surface the error so the user knows something went wrong.
-      window.alert(
-        `Couldn't generate labels: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    } finally {
-      setIsGeneratingLabels(false);
-    }
-  }, [isGeneratingLabels, po.id, po.poNumber]);
+      }),
+    [downloadBlob, po.id, po.poNumber],
+  );
+
+  const handleDownloadPdfLine = useCallback(
+    () =>
+      downloadBlob({
+        url: `/api/po-pdf/${po.id}?view=line`,
+        filename: `${po.poNumber}-line.pdf`,
+        label: "PO PDF (Line)",
+        kind: "pdf-line",
+      }),
+    [downloadBlob, po.id, po.poNumber],
+  );
+
+  const handleDownloadPdfGrid = useCallback(
+    () =>
+      downloadBlob({
+        url: `/api/po-pdf/${po.id}?view=grid`,
+        filename: `${po.poNumber}-grid.pdf`,
+        label: "PO PDF (Grid)",
+        kind: "pdf-grid",
+      }),
+    [downloadBlob, po.id, po.poNumber],
+  );
+
+  const isGeneratingLabels = isGenerating === "labels";
 
   const handleCancelEdit = useCallback(() => {
     // Reset back to PO values
@@ -615,27 +669,52 @@ export default function PurchaseOrderDetail() {
           ? [{ content: "Cancel", onAction: handleCancelEdit }]
           : [
               {
-                content: isGeneratingLabels
-                  ? "Generating…"
-                  : "Print Labels",
+                content:
+                  isGenerating === "labels" ? "Generating…" : "Print Labels",
                 onAction: handlePrintLabels,
-                loading: isGeneratingLabels,
-                disabled: isGeneratingLabels,
+                loading: isGenerating === "labels",
+                disabled: isGenerating !== null,
               },
               {
-                content: "Download PDF (Line)",
-                url: `/api/po-pdf/${po.id}?view=line`,
-                external: true,
+                content:
+                  isGenerating === "pdf-line"
+                    ? "Generating…"
+                    : "Download PDF (Line)",
+                onAction: handleDownloadPdfLine,
+                loading: isGenerating === "pdf-line",
+                disabled: isGenerating !== null,
               },
               {
-                content: "Download PDF (Grid)",
-                url: `/api/po-pdf/${po.id}?view=grid`,
-                external: true,
+                content:
+                  isGenerating === "pdf-grid"
+                    ? "Generating…"
+                    : "Download PDF (Grid)",
+                onAction: handleDownloadPdfGrid,
+                loading: isGenerating === "pdf-grid",
+                disabled: isGenerating !== null,
               },
             ]
       }
     >
       <Layout>
+        {lastDownload && (
+          <Layout.Section>
+            <Banner
+              tone="success"
+              title={`${lastDownload.label} downloaded`}
+              onDismiss={() => setLastDownload(null)}
+              action={{
+                content: "Back to Purchase Orders",
+                url: "/app/purchase-orders",
+              }}
+            >
+              <p>
+                Saved to your browser downloads as{" "}
+                <strong>{lastDownload.filename}</strong>.
+              </p>
+            </Banner>
+          </Layout.Section>
+        )}
         {actionData && "error" in actionData && (
           <Layout.Section>
             <Banner tone="critical">{String(actionData.error)}</Banner>
