@@ -32,6 +32,7 @@ export default function App() {
         <Link to="/app/stock-counts">Stock Counts</Link>
         <Link to="/app/planning">Planning</Link>
         <Link to="/app/print-labels">Print Labels</Link>
+        <Link to="/app/barcodes">Barcode Check</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>

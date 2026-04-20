@@ -1100,3 +1100,158 @@ export async function getProductsByVendor(admin: AdminApiContext, vendor: string
 
   return allProducts;
 }
+
+// ============================================
+// BARCODE AUDIT (V2.1 Barcode Check module)
+// ============================================
+
+// Lean query — pulls only what the audit needs. Paginates 100 products/call.
+const BARCODE_AUDIT_QUERY = `#graphql
+  query BarcodeAuditProducts($first: Int!, $after: String) {
+    products(first: $first, after: $after, sortKey: TITLE) {
+      edges {
+        cursor
+        node {
+          id
+          title
+          vendor
+          status
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                title
+                sku
+                barcode
+              }
+            }
+          }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+export interface AuditVariant {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  variantTitle: string;
+  vendor: string | null;
+  status: string;
+  sku: string | null;
+  barcode: string | null;
+}
+
+/**
+ * Walk the full product catalog and return one flat row per variant, with
+ * barcode + SKU + product metadata. Used by the Barcode Check module to
+ * find missing + duplicate barcodes. Handles pagination internally.
+ */
+export async function getAllVariantsForBarcodeAudit(
+  admin: AdminApiContext,
+): Promise<AuditVariant[]> {
+  const variants: AuditVariant[] = [];
+  let after: string | null = null;
+  let hasNext = true;
+
+  while (hasNext) {
+    const response = await admin.graphql(BARCODE_AUDIT_QUERY, {
+      variables: { first: 100, after },
+    });
+    const data = await response.json();
+    const page = data?.data?.products;
+    if (!page) break;
+    for (const edge of page.edges as Array<{ node: any }>) {
+      const p = edge.node;
+      for (const vEdge of p.variants?.edges ?? []) {
+        const v = vEdge.node;
+        variants.push({
+          variantId: v.id,
+          productId: p.id,
+          productTitle: p.title,
+          variantTitle: v.title,
+          vendor: p.vendor || null,
+          status: p.status,
+          sku: v.sku ?? null,
+          barcode: v.barcode ?? null,
+        });
+      }
+    }
+    hasNext = page.pageInfo.hasNextPage;
+    after = page.pageInfo.endCursor;
+  }
+
+  return variants;
+}
+
+/**
+ * Set the barcode on many variants in one Shopify mutation, grouped by
+ * product (required by productVariantsBulkUpdate).
+ *
+ * Returns a summary plus the per-variant result so the caller can render
+ * successes/failures.
+ */
+export async function setVariantBarcodes(
+  admin: AdminApiContext,
+  updates: Array<{
+    productId: string;
+    variantId: string;
+    barcode: string;
+  }>,
+): Promise<{
+  updated: number;
+  failures: Array<{ variantId: string; error: string }>;
+}> {
+  // Bucket by product since productVariantsBulkUpdate is scoped to one
+  // product at a time.
+  const byProduct = new Map<
+    string,
+    Array<{ variantId: string; barcode: string }>
+  >();
+  for (const u of updates) {
+    if (!byProduct.has(u.productId)) byProduct.set(u.productId, []);
+    byProduct.get(u.productId)!.push({
+      variantId: u.variantId,
+      barcode: u.barcode,
+    });
+  }
+
+  let updated = 0;
+  const failures: Array<{ variantId: string; error: string }> = [];
+
+  for (const [productId, list] of byProduct.entries()) {
+    try {
+      const resp = await admin.graphql(
+        PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+        {
+          variables: {
+            productId,
+            variants: list.map((v) => ({ id: v.variantId, barcode: v.barcode })),
+          },
+        },
+      );
+      const data = (await resp.json()) as any;
+      const errs = data?.data?.productVariantsBulkUpdate?.userErrors ?? [];
+      if (errs.length > 0) {
+        for (const v of list) {
+          failures.push({
+            variantId: v.variantId,
+            error: errs
+              .map((e: { message: string }) => e.message)
+              .join("; "),
+          });
+        }
+      } else {
+        updated += list.length;
+      }
+    } catch (error) {
+      for (const v of list) {
+        failures.push({ variantId: v.variantId, error: String(error) });
+      }
+    }
+  }
+
+  return { updated, failures };
+}
