@@ -275,6 +275,47 @@ model StockCountLineItem {
 }
 
 // ============================================
+// PRODUCT BULK ACTIONS (audit log — V2.1 Products module)
+// ============================================
+// A "session" is one bulk edit run from the Products module (change vendor,
+// set COGs, add/remove tags, archive). Changes rows record per-product
+// before/after values so catastrophic edits can be reviewed and reversed.
+model ProductBulkActionSession {
+  id         String   @id @default(cuid())
+  shop       String
+  action     String // change_vendor | set_cogs | edit_tags | archive
+  notes      String? // optional context (e.g. filter used)
+  createdAt  DateTime @default(now())
+  createdBy  String? // optional staff identifier
+  totalCount Int      @default(0) // # products targeted
+  okCount    Int      @default(0) // # that succeeded
+  errorCount Int      @default(0)
+
+  changes ProductBulkActionChange[]
+
+  @@index([shop, createdAt])
+  @@index([action])
+}
+
+model ProductBulkActionChange {
+  id               String   @id @default(cuid())
+  sessionId        String
+  shopifyProductId String
+  productTitle     String?
+  field            String // vendor | status | tags | cost
+  previousValue    String? // JSON or scalar string
+  newValue         String? // JSON or scalar string
+  ok               Boolean  @default(true)
+  error            String?
+  createdAt        DateTime @default(now())
+
+  session ProductBulkActionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([shopifyProductId])
+}
+
+// ============================================
 // PRODUCT BUILDER (templates, optional)
 // ============================================
 model ProductTemplate {

@@ -747,6 +747,337 @@ export async function searchProductsByVendor(admin: AdminApiContext, vendor: str
   return data.data.products;
 }
 
+// ============================================
+// BULK PRODUCT MANAGEMENT (V2.1 Products module)
+// ============================================
+
+// Rich product listing used by the /app/products table. Pulls vendor, status,
+// tags, totalInventory, featured image, and unit cost per variant (for the
+// COGs column and audit-log "before" snapshots).
+const LIST_PRODUCTS_QUERY = `#graphql
+  query ListProducts($first: Int!, $after: String, $query: String) {
+    products(first: $first, after: $after, query: $query, sortKey: TITLE) {
+      edges {
+        cursor
+        node {
+          id
+          title
+          handle
+          vendor
+          status
+          tags
+          totalInventory
+          createdAt
+          featuredImage { url altText }
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                sku
+                inventoryItem {
+                  id
+                  unitCost { amount currencyCode }
+                }
+              }
+            }
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+export interface ListedProduct {
+  id: string;
+  title: string;
+  handle: string;
+  vendor: string | null;
+  status: string;
+  tags: string[];
+  totalInventory: number;
+  createdAt: string;
+  imageUrl: string | null;
+  variantCount: number;
+  // Average unit cost across variants with a non-null cost. Null if no variant
+  // has a cost set.
+  avgUnitCost: number | null;
+  variants: Array<{
+    id: string;
+    sku: string | null;
+    inventoryItemId: string;
+    unitCost: number | null;
+  }>;
+}
+
+export async function listProducts(
+  admin: AdminApiContext,
+  {
+    first = 50,
+    after,
+    query,
+  }: { first?: number; after?: string | null; query?: string | null } = {},
+): Promise<{
+  products: ListedProduct[];
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+}> {
+  const response = await admin.graphql(LIST_PRODUCTS_QUERY, {
+    variables: { first, after: after ?? null, query: query || null },
+  });
+  const data = await response.json();
+  const edges = data.data?.products?.edges ?? [];
+  const products: ListedProduct[] = edges.map((edge: any) => {
+    const node = edge.node;
+    const vEdges = node.variants?.edges ?? [];
+    const variants = vEdges.map((v: any) => ({
+      id: v.node.id,
+      sku: v.node.sku ?? null,
+      inventoryItemId: v.node.inventoryItem?.id ?? "",
+      unitCost: v.node.inventoryItem?.unitCost?.amount
+        ? parseFloat(v.node.inventoryItem.unitCost.amount)
+        : null,
+    }));
+    const costed = variants.filter((v: any) => v.unitCost !== null);
+    const avgUnitCost =
+      costed.length > 0
+        ? costed.reduce((s: number, v: any) => s + (v.unitCost ?? 0), 0) /
+          costed.length
+        : null;
+    return {
+      id: node.id,
+      title: node.title,
+      handle: node.handle,
+      vendor: node.vendor || null,
+      status: node.status,
+      tags: node.tags ?? [],
+      totalInventory: node.totalInventory ?? 0,
+      createdAt: node.createdAt,
+      imageUrl: node.featuredImage?.url ?? null,
+      variantCount: vEdges.length,
+      avgUnitCost,
+      variants,
+    } as ListedProduct;
+  });
+  const pageInfo = data.data?.products?.pageInfo ?? {
+    hasNextPage: false,
+    endCursor: null,
+  };
+  return { products, pageInfo };
+}
+
+// Fetch a product's current vendor, status, tags, and per-variant costs — used
+// to take a "before" snapshot for the bulk action audit log.
+const PRODUCT_AUDIT_SNAPSHOT_QUERY = `#graphql
+  query ProductAuditSnapshot($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Product {
+        id
+        title
+        vendor
+        status
+        tags
+        variants(first: 100) {
+          edges {
+            node {
+              id
+              inventoryItem {
+                id
+                unitCost { amount currencyCode }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export interface ProductSnapshot {
+  id: string;
+  title: string;
+  vendor: string | null;
+  status: string;
+  tags: string[];
+  variants: Array<{
+    id: string;
+    inventoryItemId: string;
+    unitCost: number | null;
+  }>;
+}
+
+export async function getProductSnapshots(
+  admin: AdminApiContext,
+  productIds: string[],
+): Promise<Map<string, ProductSnapshot>> {
+  if (productIds.length === 0) return new Map();
+  const response = await admin.graphql(PRODUCT_AUDIT_SNAPSHOT_QUERY, {
+    variables: { ids: productIds },
+  });
+  const data = await response.json();
+  const nodes = data.data?.nodes ?? [];
+  const out = new Map<string, ProductSnapshot>();
+  for (const node of nodes) {
+    if (!node?.id) continue;
+    const vEdges = node.variants?.edges ?? [];
+    out.set(node.id, {
+      id: node.id,
+      title: node.title,
+      vendor: node.vendor || null,
+      status: node.status,
+      tags: node.tags ?? [],
+      variants: vEdges.map((e: any) => ({
+        id: e.node.id,
+        inventoryItemId: e.node.inventoryItem?.id ?? "",
+        unitCost: e.node.inventoryItem?.unitCost?.amount
+          ? parseFloat(e.node.inventoryItem.unitCost.amount)
+          : null,
+      })),
+    });
+  }
+  return out;
+}
+
+// Single-product updates for vendor / status. Shopify rate-limits these to
+// ~1000 cost points per 60s; the bulk service batches calls in groups of 25.
+const PRODUCT_UPDATE_MUTATION = `#graphql
+  mutation UpdateProduct($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id vendor status }
+      userErrors { field message }
+    }
+  }
+`;
+
+export async function updateProductFields(
+  admin: AdminApiContext,
+  productId: string,
+  input: { vendor?: string; status?: "ACTIVE" | "ARCHIVED" | "DRAFT" },
+): Promise<{ ok: boolean; error: string | null }> {
+  try {
+    const response = await admin.graphql(PRODUCT_UPDATE_MUTATION, {
+      variables: {
+        input: {
+          id: productId,
+          ...(input.vendor !== undefined ? { vendor: input.vendor } : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+        },
+      },
+    });
+    const data = await response.json();
+    const errs = data.data?.productUpdate?.userErrors ?? [];
+    if (errs.length > 0) {
+      return { ok: false, error: errs.map((e: any) => e.message).join("; ") };
+    }
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+// tagsAdd / tagsRemove are cheaper than productUpdate { tags } because they
+// don't require re-sending the whole tag list (Shopify merges server-side).
+const TAGS_ADD_MUTATION = `#graphql
+  mutation TagsAdd($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      node { ... on Product { id tags } }
+      userErrors { field message }
+    }
+  }
+`;
+
+const TAGS_REMOVE_MUTATION = `#graphql
+  mutation TagsRemove($id: ID!, $tags: [String!]!) {
+    tagsRemove(id: $id, tags: $tags) {
+      node { ... on Product { id tags } }
+      userErrors { field message }
+    }
+  }
+`;
+
+export async function addTags(
+  admin: AdminApiContext,
+  productId: string,
+  tags: string[],
+): Promise<{ ok: boolean; error: string | null }> {
+  if (tags.length === 0) return { ok: true, error: null };
+  try {
+    const response = await admin.graphql(TAGS_ADD_MUTATION, {
+      variables: { id: productId, tags },
+    });
+    const data = await response.json();
+    const errs = data.data?.tagsAdd?.userErrors ?? [];
+    if (errs.length > 0) {
+      return { ok: false, error: errs.map((e: any) => e.message).join("; ") };
+    }
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+export async function removeTags(
+  admin: AdminApiContext,
+  productId: string,
+  tags: string[],
+): Promise<{ ok: boolean; error: string | null }> {
+  if (tags.length === 0) return { ok: true, error: null };
+  try {
+    const response = await admin.graphql(TAGS_REMOVE_MUTATION, {
+      variables: { id: productId, tags },
+    });
+    const data = await response.json();
+    const errs = data.data?.tagsRemove?.userErrors ?? [];
+    if (errs.length > 0) {
+      return { ok: false, error: errs.map((e: any) => e.message).join("; ") };
+    }
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+// Bulk-update COGs across a product's variants. Reuses the existing
+// productVariantsBulkUpdate mutation; Shopify accepts inventoryItem.cost on
+// the variant input.
+const PRODUCT_VARIANTS_BULK_COST_MUTATION = `#graphql
+  mutation VariantsBulkCost($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id inventoryItem { id unitCost { amount } } }
+      userErrors { field message }
+    }
+  }
+`;
+
+export async function updateVariantCosts(
+  admin: AdminApiContext,
+  productId: string,
+  variants: Array<{ id: string; cost: number }>,
+): Promise<{ ok: boolean; error: string | null }> {
+  if (variants.length === 0) return { ok: true, error: null };
+  try {
+    const response = await admin.graphql(PRODUCT_VARIANTS_BULK_COST_MUTATION, {
+      variables: {
+        productId,
+        variants: variants.map((v) => ({
+          id: v.id,
+          inventoryItem: { cost: v.cost.toFixed(2) },
+        })),
+      },
+    });
+    const data = await response.json();
+    const errs = data.data?.productVariantsBulkUpdate?.userErrors ?? [];
+    if (errs.length > 0) {
+      return { ok: false, error: errs.map((e: any) => e.message).join("; ") };
+    }
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
 // Get all products for a vendor (for loading full catalog)
 export async function getProductsByVendor(admin: AdminApiContext, vendor: string) {
   const allProducts: Array<Record<string, unknown>> = [];
