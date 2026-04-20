@@ -39,6 +39,11 @@ import { LocationPicker } from "../components/LocationPicker";
 import { BarcodeScanInput } from "../components/BarcodeScanInput";
 import db from "../db.server";
 
+// Hidden for now per user request. Set to true to re-enable the Fast Scan
+// Mode card. All handlers and the scanLookup memo are still wired up so
+// flipping this flag is all that's needed to bring it back.
+const SHOW_SCAN_MODE = false;
+
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const po = await getPurchaseOrder(session.shop, params.id!);
@@ -404,37 +409,41 @@ export default function ReceivePurchaseOrder() {
           </Card>
         </Layout.Section>
 
-        {/* Scan-to-line */}
-        <Layout.Section>
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h3" variant="headingSm">
-                Fast scan mode
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                Focus this field and scan items — each scan increments the
-                matching line by 1. USB scanners work like keyboards.
-              </Text>
-              <BarcodeScanInput
-                onScan={handleScan}
-                label="Scan barcode"
-                labelHidden
-                placeholder="Scan SKU or barcode…"
-              />
-              {scanFeedback && (
-                <Text
-                  as="p"
-                  variant="bodySm"
-                  tone={
-                    scanFeedback.startsWith("✓") ? "success" : "subdued"
-                  }
-                >
-                  {scanFeedback}
+        {/* Fast scan mode — hidden for now. Flip SHOW_SCAN_MODE to true to
+            re-enable. handleScan / scanLookup / BarcodeScanInput are all
+            still wired up, just not rendered. */}
+        {SHOW_SCAN_MODE && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="300">
+                <Text as="h3" variant="headingSm">
+                  Fast scan mode
                 </Text>
-              )}
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Focus this field and scan items — each scan increments
+                  the matching line by 1. USB scanners work like keyboards.
+                </Text>
+                <BarcodeScanInput
+                  onScan={handleScan}
+                  label="Scan barcode"
+                  labelHidden
+                  placeholder="Scan SKU or barcode…"
+                />
+                {scanFeedback && (
+                  <Text
+                    as="p"
+                    variant="bodySm"
+                    tone={
+                      scanFeedback.startsWith("✓") ? "success" : "subdued"
+                    }
+                  >
+                    {scanFeedback}
+                  </Text>
+                )}
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
 
         {/* Line items — grid or line view */}
         <Layout.Section>
@@ -563,8 +572,8 @@ function QtyInput({
   onChange: (v: number) => void;
 }) {
   return (
-    <InlineStack gap="100" blockAlign="center" wrap={false}>
-      <div style={{ width: "72px" }}>
+    <InlineStack gap="050" blockAlign="center" wrap={false}>
+      <div style={{ width: "56px" }}>
         <TextField
           label="Qty"
           labelHidden
@@ -577,7 +586,7 @@ function QtyInput({
         />
       </div>
       <Text as="span" variant="bodySm" tone="subdued">
-        / {max}
+        /{max}
       </Text>
     </InlineStack>
   );
@@ -722,9 +731,9 @@ function POReceiveGrid({
           <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
             <th
               style={{
-                padding: "8px",
+                padding: "6px 8px",
                 textAlign: "left",
-                minWidth: "240px",
+                width: "200px",
               }}
             >
               Product / Variant
@@ -734,22 +743,23 @@ function POReceiveGrid({
                 <th
                   key={s}
                   style={{
-                    padding: "8px",
+                    padding: "6px 4px",
                     textAlign: "center",
-                    minWidth: "150px",
                   }}
                 >
                   {s}
                 </th>
               ))
             ) : (
-              <th style={{ padding: "8px", textAlign: "center" }}>Qty</th>
+              <th style={{ padding: "6px 4px", textAlign: "center" }}>
+                Qty
+              </th>
             )}
             <th
               style={{
-                padding: "8px",
+                padding: "6px 8px",
                 textAlign: "right",
-                minWidth: "140px",
+                width: "130px",
               }}
             ></th>
           </tr>
@@ -763,7 +773,7 @@ function POReceiveGrid({
             });
             return (
               <tr key={key} style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
+                <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
                   <div style={{ fontWeight: 500 }}>{g.productTitle}</div>
                   {g.nonSize && (
                     <Text as="span" variant="bodySm" tone="subdued">
@@ -774,7 +784,7 @@ function POReceiveGrid({
                 {g.noSize ? (
                   <td
                     colSpan={sizeColCount}
-                    style={{ padding: "8px", verticalAlign: "top" }}
+                    style={{ padding: "6px 8px", verticalAlign: "top" }}
                   >
                     {(() => {
                       const li = g.bySize["_single"];
@@ -796,7 +806,7 @@ function POReceiveGrid({
                         <td
                           key={s}
                           style={{
-                            padding: "8px",
+                            padding: "6px 4px",
                             textAlign: "center",
                             background: "#f9f9f9",
                             color: "#9ca3af",
@@ -809,7 +819,7 @@ function POReceiveGrid({
                     return (
                       <td
                         key={s}
-                        style={{ padding: "4px 8px", verticalAlign: "top" }}
+                        style={{ padding: "4px 4px", verticalAlign: "top" }}
                       >
                         <QtyInput
                           value={quantities[li.id] ?? 0}
@@ -832,7 +842,13 @@ function POReceiveGrid({
                     );
                   })
                 )}
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
+                <td
+                  style={{
+                    padding: "6px 8px",
+                    verticalAlign: "top",
+                    textAlign: "right",
+                  }}
+                >
                   {allReceived ? (
                     <Badge tone="success">All received</Badge>
                   ) : (
