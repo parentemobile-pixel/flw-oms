@@ -51,25 +51,56 @@ import type {
   ExistingOptionValues,
   Publication,
 } from "../services/shopify-api/products.server";
+import {
+  getLocations,
+  type Location,
+} from "../services/shopify-api/locations.server";
 import { MENS_SIZES, WOMENS_SIZES } from "../utils/constants";
+
+/**
+ * Find the POS publication from the store's list. Shopify calls it "Point of
+ * Sale" — matching by name (case-insensitive contains "point of sale" or
+ * "pos") covers every naming Shopify has used over the years.
+ */
+function findPosPublicationId(publications: Publication[]): string | null {
+  const pos = publications.find(
+    (p) =>
+      /point of sale/i.test(p.name) ||
+      /\bpos\b/i.test(p.name),
+  );
+  return pos?.id ?? null;
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
-  // Run the 4 Shopify metadata queries in parallel, each behind the
-  // shopify-cache.server.ts TTL cache. First load hits the network; within the
-  // TTL window subsequent loads are near-instant (single SQLite read each).
-  const [vendors, metafieldDefs, existingOptions, publications] =
+  // Run the Shopify metadata queries in parallel, each behind the
+  // shopify-cache.server.ts TTL cache.
+  const [vendors, metafieldDefs, existingOptions, publications, locations] =
     await Promise.all([
       getVendors(admin, session.shop),
       getMetafieldDefinitions(admin, session.shop),
       getExistingOptionValues(admin, session.shop),
       getPublications(admin, session.shop),
+      getLocations(admin, session.shop).catch(() => [] as Location[]),
     ]);
-  return json({ vendors, metafieldDefs, existingOptions, publications });
+
+  // Default publication selection: POS only. Everything else (Online Store,
+  // Shop, etc.) is off by default so products are internal-first.
+  const posId = findPosPublicationId(publications);
+  const defaultPublicationIds = posId ? [posId] : [];
+
+  return json({
+    vendors,
+    metafieldDefs,
+    existingOptions,
+    publications,
+    locations,
+    defaultPublicationIds,
+  });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
@@ -91,6 +122,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const tags = JSON.parse(
     (formData.get("tags") as string) || "[]",
   ) as string[];
+  // Starting inventory: optional. Shape matches CreateProductInput.initialInventory:
+  // { [optionValues joined by "/"]: { [locationId]: quantity } }
+  const initialInventory = JSON.parse(
+    (formData.get("initialInventory") as string) || "{}",
+  ) as Record<string, Record<string, number>>;
 
   if (!title || !vendor || !price) {
     return json({
@@ -109,6 +145,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       metafields: metafields.length > 0 ? metafields : undefined,
       imageUrl: imageUrl || undefined,
       tags: tags.length > 0 ? tags : undefined,
+      initialInventory:
+        Object.keys(initialInventory).length > 0 ? initialInventory : undefined,
+      shop: session.shop,
     });
 
     if (result.userErrors?.length > 0) {
@@ -179,6 +218,9 @@ export default function ProductBuilder() {
   const metafieldDefs = (loaderData?.metafieldDefs || []) as MetafieldDefinition[];
   const existingOptions = (loaderData?.existingOptions || {}) as ExistingOptionValues;
   const publications = (loaderData?.publications || []) as Publication[];
+  const locations = (loaderData?.locations || []) as Location[];
+  const defaultPublicationIds = (loaderData?.defaultPublicationIds ||
+    []) as string[];
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
@@ -206,10 +248,19 @@ export default function ProductBuilder() {
     { id: "color", name: "Color", values: [], newValue: "" },
   ]);
 
-  // Sales channels - default all selected
-  const [selectedPubs, setSelectedPubs] = useState<string[]>(
-    publications.map((p) => p.id),
-  );
+  // Sales channels — default to POS only (the server-computed default).
+  // Other channels (Online Store, Shop, etc.) stay off by default so new
+  // products are internal-first; users can explicitly opt-in per product.
+  const [selectedPubs, setSelectedPubs] =
+    useState<string[]>(defaultPublicationIds);
+
+  // Starting inventory — optional. User toggles it on, then fills in a
+  // per-variant-per-location qty table. When off, no inventory is set and
+  // variants start at 0 everywhere.
+  const [setStartingInventory, setSetStartingInventory] = useState(false);
+  const [startingInventory, setStartingInventory_] = useState<
+    Record<string, Record<string, number>>
+  >({});
 
   // Add vendor modal
   const [addVendorModalOpen, setAddVendorModalOpen] = useState(false);
@@ -249,13 +300,37 @@ export default function ProductBuilder() {
         { id: "size", name: "Size", values: [], newValue: "" },
         { id: "color", name: "Color", values: [], newValue: "" },
       ]);
-      setSelectedPubs(publications.map((p) => p.id));
+      setSelectedPubs(defaultPublicationIds);
+      setSetStartingInventory(false);
+      setStartingInventory_({});
       setIsFLWBrand("");
       setIsFLWCore("");
       setHasSeason("");
       setSelectedSeason("");
     }
-  }, [actionData, publications]);
+  }, [actionData, publications, defaultPublicationIds]);
+
+  // When "Save & View" succeeds, redirect the user into the Shopify admin's
+  // product page so they can immediately see what was just created. We
+  // navigate the whole embedded-app iframe (target=_top) to the shopify:
+  // URL scheme; App Bridge intercepts and deep-links into the admin.
+  useEffect(() => {
+    if (
+      actionData &&
+      "success" in actionData &&
+      actionData.intent === "saveAndOpen" &&
+      actionData.productNumericId
+    ) {
+      const url = `shopify:admin/products/${actionData.productNumericId}`;
+      // Prefer the top frame so the Shopify admin handles the link; fall
+      // back to current window if top isn't accessible (dev/preview).
+      try {
+        (window.top ?? window).location.href = url;
+      } catch {
+        window.location.href = url;
+      }
+    }
+  }, [actionData]);
 
   // Build tags from tagging questions
   const computedTags: string[] = [];
@@ -495,6 +570,22 @@ export default function ProductBuilder() {
       if (imageUrl) formData.set("imageUrl", imageUrl);
       formData.set("publications", JSON.stringify(selectedPubs));
       formData.set("tags", JSON.stringify(computedTags));
+      // Only send starting inventory when the toggle is on. We also drop
+      // any zero-qty entries on the client so the backend payload is lean.
+      if (setStartingInventory) {
+        const nonZero: Record<string, Record<string, number>> = {};
+        for (const [variantKey, perLoc] of Object.entries(startingInventory)) {
+          for (const [locId, qty] of Object.entries(perLoc)) {
+            if (qty && qty > 0) {
+              if (!nonZero[variantKey]) nonZero[variantKey] = {};
+              nonZero[variantKey][locId] = qty;
+            }
+          }
+        }
+        if (Object.keys(nonZero).length > 0) {
+          formData.set("initialInventory", JSON.stringify(nonZero));
+        }
+      }
       submit(formData, { method: "post" });
     },
     [
@@ -512,6 +603,8 @@ export default function ProductBuilder() {
       imageFile,
       uploadImage,
       submit,
+      setStartingInventory,
+      startingInventory,
     ],
   );
 
@@ -1192,6 +1285,159 @@ export default function ProductBuilder() {
                     onChange={() => handleTogglePub(pub.id)}
                   />
                 ))}
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Starting Inventory (optional toggle) */}
+        {locations.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <InlineStack align="space-between" blockAlign="center">
+                  <BlockStack gap="050">
+                    <Text as="h2" variant="headingMd">
+                      Set starting inventory?
+                    </Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Optional. If skipped, all variants start at 0 units at
+                      every location.
+                    </Text>
+                  </BlockStack>
+                  <ButtonGroup variant="segmented">
+                    <Button
+                      pressed={!setStartingInventory}
+                      onClick={() => setSetStartingInventory(false)}
+                      size="slim"
+                    >
+                      No
+                    </Button>
+                    <Button
+                      pressed={setStartingInventory}
+                      onClick={() => setSetStartingInventory(true)}
+                      size="slim"
+                    >
+                      Yes
+                    </Button>
+                  </ButtonGroup>
+                </InlineStack>
+
+                {setStartingInventory && variantPreview.length > 0 && (
+                  <>
+                    <Divider />
+                    <BlockStack gap="300">
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        Enter starting quantities per variant. Blank or 0 =
+                        no inventory added.
+                      </Text>
+                      <div style={{ overflowX: "auto" }}>
+                        <table
+                          style={{
+                            width: "100%",
+                            borderCollapse: "collapse",
+                            fontSize: "13px",
+                          }}
+                        >
+                          <thead>
+                            <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
+                              <th
+                                style={{ padding: "6px 8px", textAlign: "left" }}
+                              >
+                                Variant
+                              </th>
+                              {locations.map((loc) => (
+                                <th
+                                  key={loc.id}
+                                  style={{
+                                    padding: "6px 8px",
+                                    textAlign: "center",
+                                    minWidth: "80px",
+                                  }}
+                                >
+                                  {loc.name}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {variantPreview.map((row) => {
+                              // row = [optVal1, optVal2, ..., sku, price]
+                              const optValues = row.slice(
+                                0,
+                                row.length - 2,
+                              );
+                              const variantKey = optValues.join("/");
+                              const sku = row[row.length - 2];
+                              return (
+                                <tr
+                                  key={variantKey}
+                                  style={{
+                                    borderBottom: "1px solid #f1f1f1",
+                                  }}
+                                >
+                                  <td style={{ padding: "6px 8px" }}>
+                                    {optValues.join(" / ") || "(default)"}
+                                    {sku && (
+                                      <Text
+                                        as="span"
+                                        variant="bodySm"
+                                        tone="subdued"
+                                      >
+                                        {" "}
+                                        · {sku}
+                                      </Text>
+                                    )}
+                                  </td>
+                                  {locations.map((loc) => {
+                                    const qty =
+                                      startingInventory[variantKey]?.[
+                                        loc.id
+                                      ] ?? 0;
+                                    return (
+                                      <td
+                                        key={loc.id}
+                                        style={{ padding: "2px 4px" }}
+                                      >
+                                        <TextField
+                                          label="Qty"
+                                          labelHidden
+                                          type="number"
+                                          value={String(qty)}
+                                          onChange={(val: string) => {
+                                            const n = Math.max(
+                                              0,
+                                              parseInt(val, 10) || 0,
+                                            );
+                                            setStartingInventory_((prev) => ({
+                                              ...prev,
+                                              [variantKey]: {
+                                                ...(prev[variantKey] ?? {}),
+                                                [loc.id]: n,
+                                              },
+                                            }));
+                                          }}
+                                          autoComplete="off"
+                                          min={0}
+                                        />
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </BlockStack>
+                  </>
+                )}
+                {setStartingInventory && variantPreview.length === 0 && (
+                  <Banner tone="info">
+                    Add at least one variant option (e.g. Size) before setting
+                    starting inventory.
+                  </Banner>
+                )}
               </BlockStack>
             </Card>
           </Layout.Section>

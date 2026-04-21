@@ -3,6 +3,7 @@ import {
   CACHE_KEYS,
   CACHE_TTL,
   getCached,
+  invalidateCache,
 } from "../cache/shopify-cache.server";
 import { generateBarcodeForVariant } from "./barcodes.server";
 
@@ -368,6 +369,12 @@ export interface CreateProductInput {
    * where variantOptionKey = activeOption values joined by "/" (e.g. "M/Red").
    */
   initialInventory?: Record<string, Record<string, number>>;
+  /**
+   * Shop domain — optional, but when provided we invalidate the metadata
+   * caches (vendors, option values) after successful creation so the next
+   * Product Builder page load reflects the new vendor / option values.
+   */
+  shop?: string;
 }
 
 const PRODUCT_VARIANTS_BULK_UPDATE_MUTATION = `#graphql
@@ -408,6 +415,14 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
   // Generate variant combinations
   const combos = generateVariantCombinations(activeOptions);
 
+  // Parse cost once so every variant gets the same unit cost (cost is
+  // per-product in our UI, not per-variant). productSet accepts it on
+  // inventoryItem.cost.
+  const parsedCost =
+    input.cost != null && input.cost !== ""
+      ? parseFloat(input.cost)
+      : null;
+
   const variants = combos.map((combo) => {
     // Build SKU from prefix + option values
     let sku: string | undefined;
@@ -420,6 +435,9 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
       optionValues: combo,
       price: parseFloat(input.price),
       ...(sku ? { sku } : {}),
+      ...(parsedCost != null && Number.isFinite(parsedCost) && parsedCost >= 0
+        ? { inventoryItem: { cost: parsedCost.toFixed(2) } }
+        : {}),
     };
   });
 
@@ -534,6 +552,16 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
       } catch (error) {
         console.error("Failed to set initial inventory:", error);
       }
+    }
+
+    // Invalidate vendors + option-value caches so a newly-added vendor or a
+    // new option value shows up on the NEXT Product Builder load instead of
+    // waiting the full cache TTL. Best-effort, ignore failures.
+    if (input.shop) {
+      await invalidateCache(input.shop, [
+        CACHE_KEYS.VENDORS,
+        CACHE_KEYS.OPTION_VALUES,
+      ]).catch(() => {});
     }
   }
 
