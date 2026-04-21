@@ -877,20 +877,84 @@ const STAGED_UPLOADS_MUTATION = `#graphql
   }
 `;
 
-export async function createStagedUpload(admin: AdminApiContext, filename: string, mimeType: string, fileSize: string) {
+/**
+ * Shopify's StagedUploadInput.resource enum values we care about.
+ * - IMAGE: JPG/PNG/GIF, used for product hero images
+ * - FILE:  PDFs, docs, anything else attached via file_reference metafields
+ *   (e.g. a cutting ticket uploaded during Product Builder)
+ */
+export type StagedUploadResource = "IMAGE" | "FILE";
+
+export async function createStagedUpload(
+  admin: AdminApiContext,
+  filename: string,
+  mimeType: string,
+  fileSize: string,
+  resource: StagedUploadResource = "IMAGE",
+) {
   const response = await admin.graphql(STAGED_UPLOADS_MUTATION, {
     variables: {
       input: [{
         filename,
         mimeType,
         httpMethod: "POST",
-        resource: "IMAGE",
+        resource,
         fileSize,
       }],
     },
   });
   const data = await response.json();
   return data.data.stagedUploadsCreate.stagedTargets[0];
+}
+
+// Finalize a staged upload as a Shopify file. Returns the file's gid so it
+// can be stored in a file_reference / list.file_reference metafield.
+const FILE_CREATE_MUTATION = `#graphql
+  mutation FileCreate($files: [FileCreateInput!]!) {
+    fileCreate(files: $files) {
+      files {
+        id
+        alt
+        fileStatus
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export async function createFileFromStagedUpload(
+  admin: AdminApiContext,
+  resourceUrl: string,
+  filename: string,
+  mimeType: string,
+): Promise<{ id: string }> {
+  // Content type picker: IMAGE for images (media image object), FILE for
+  // anything else. PDFs land as GenericFile; images land as MediaImage.
+  const contentType = mimeType.startsWith("image/") ? "IMAGE" : "FILE";
+  const response = await admin.graphql(FILE_CREATE_MUTATION, {
+    variables: {
+      files: [{
+        alt: filename,
+        contentType,
+        originalSource: resourceUrl,
+      }],
+    },
+  });
+  const data = await response.json();
+  const userErrors = data?.data?.fileCreate?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    throw new Error(
+      `fileCreate failed: ${userErrors
+        .map((e: { message: string }) => e.message)
+        .join("; ")}`,
+    );
+  }
+  const file = data?.data?.fileCreate?.files?.[0];
+  if (!file?.id) throw new Error("fileCreate returned no file id");
+  return { id: file.id };
 }
 
 export async function searchProducts(admin: AdminApiContext, query: string) {

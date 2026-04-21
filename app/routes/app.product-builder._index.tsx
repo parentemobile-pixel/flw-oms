@@ -58,6 +58,7 @@ import {
   type Location,
 } from "../services/shopify-api/locations.server";
 import { MENS_SIZES, WOMENS_SIZES } from "../utils/constants";
+import { stageAndUpload, createFile } from "../utils/shopify-upload";
 
 /**
  * Find the POS publication from the store's list. Shopify calls it "Point of
@@ -304,6 +305,29 @@ export default function ProductBuilder() {
   const [cost, setCost] = useState("");
   const [skuPrefix, setSkuPrefix] = useState("");
   const [metafieldValues, setMetafieldValues] = useState<Record<string, string>>({});
+  // For file_reference / list.file_reference metafields (e.g. cutting
+  // ticket). Parallel to metafieldValues — holds user-visible state
+  // (filename, uploading flag, resolved gid) while metafieldValues holds
+  // the final serialized value we send to Shopify (single gid string, or
+  // JSON array of gids for list types).
+  type MetafieldFile = {
+    // Stable ID — matching uploads back to their state entry by name is
+    // ambiguous when a user drops two files with the same filename into
+    // a list.file_reference; a UUID keeps each upload distinct.
+    id: string;
+    name: string;
+    gid: string; // empty while uploading
+    uploading: boolean;
+    error?: string;
+  };
+  const [metafieldFiles, setMetafieldFiles] = useState<
+    Record<string, MetafieldFile[]>
+  >({});
+  // Block Save while any metafield file is still uploading — the serialized
+  // gid isn't in metafieldValues yet, so submitting now would drop the file.
+  const anyMetafieldUploading = Object.values(metafieldFiles).some((arr) =>
+    arr.some((f) => f.uploading),
+  );
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState("");
   const [uploadedImageUrl, setUploadedImageUrl] = useState("");
@@ -355,6 +379,7 @@ export default function ProductBuilder() {
     setCost("");
     setSkuPrefix("");
     setMetafieldValues({});
+    setMetafieldFiles({});
     setImageFile(null);
     setImagePreview("");
     setUploadedImageUrl("");
@@ -421,37 +446,15 @@ export default function ProductBuilder() {
     setUploadedImageUrl("");
   }, []);
 
-  // Upload image via staged upload before submitting product
+  // Upload image via staged upload before submitting product. Images go
+  // through stage+POST only — Shopify's product mutations accept the
+  // resulting `resourceUrl` directly, no fileCreate needed.
   const uploadImage = useCallback(async (): Promise<string> => {
     if (!imageFile) return "";
     if (uploadedImageUrl) return uploadedImageUrl;
 
     try {
-      // Step 1: Get staged upload target
-      const stageForm = new FormData();
-      stageForm.set("filename", imageFile.name);
-      stageForm.set("mimeType", imageFile.type);
-      stageForm.set("fileSize", String(imageFile.size));
-
-      const stageRes = await fetch("/api/staged-upload", {
-        method: "POST",
-        body: stageForm,
-      });
-      const stageData = await stageRes.json();
-      if (stageData.error) throw new Error(stageData.error);
-
-      const target = stageData.target;
-
-      // Step 2: Upload file to staged target
-      const uploadForm = new FormData();
-      for (const param of target.parameters) {
-        uploadForm.append(param.name, param.value);
-      }
-      uploadForm.append("file", imageFile);
-
-      await fetch(target.url, { method: "POST", body: uploadForm });
-
-      // Step 3: Return the resourceUrl for product creation
+      const target = await stageAndUpload(imageFile, "IMAGE");
       setUploadedImageUrl(target.resourceUrl);
       return target.resourceUrl;
     } catch (error) {
@@ -585,6 +588,123 @@ export default function ProductBuilder() {
   const handleMetafieldChange = useCallback((key: string, value: string) => {
     setMetafieldValues((prev) => ({ ...prev, [key]: value }));
   }, []);
+
+  // After any change to the uploaded file list for a given metafield key,
+  // recompute the serialized value we send to Shopify:
+  //   file_reference       -> the single gid, or ""
+  //   list.file_reference  -> JSON array of gids, or "" (empty -> drop)
+  const syncMetafieldFileValue = useCallback(
+    (metaKey: string, isList: boolean, files: MetafieldFile[]) => {
+      const ready = files.filter((f) => f.gid && !f.uploading);
+      // Empty → "" so the submit filter drops the metafield altogether;
+      // sending "[]" would create a list metafield with zero entries,
+      // which is noise.
+      const value =
+        ready.length === 0
+          ? ""
+          : isList
+            ? JSON.stringify(ready.map((f) => f.gid))
+            : ready[0].gid;
+      setMetafieldValues((prev) => ({ ...prev, [metaKey]: value }));
+    },
+    [],
+  );
+
+  // Patch a single in-flight upload (keyed by stable id) and resync the
+  // serialized metafield value. Used by both the success and failure
+  // paths of the upload callback.
+  const patchMetafieldFile = useCallback(
+    (
+      metaKey: string,
+      isList: boolean,
+      fileId: string,
+      patch: Partial<MetafieldFile>,
+    ) => {
+      setMetafieldFiles((prev) => {
+        const cur = prev[metaKey] ?? [];
+        const next = cur.map((f) => (f.id === fileId ? { ...f, ...patch } : f));
+        syncMetafieldFileValue(metaKey, isList, next);
+        return { ...prev, [metaKey]: next };
+      });
+    },
+    [syncMetafieldFileValue],
+  );
+
+  // Full client-side upload for a metafield file: stage → POST bytes →
+  // fileCreate → store gid. Mutates the entry identified by fileId so the
+  // UI reflects uploading / failed state without a second source of truth.
+  const uploadMetafieldFile = useCallback(
+    async (
+      metaKey: string,
+      isList: boolean,
+      fileId: string,
+      file: File,
+    ): Promise<void> => {
+      try {
+        const target = await stageAndUpload(file, "FILE");
+        const gid = await createFile(
+          target.resourceUrl,
+          file.name,
+          file.type,
+        );
+        patchMetafieldFile(metaKey, isList, fileId, {
+          gid,
+          uploading: false,
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("Metafield file upload failed:", msg);
+        patchMetafieldFile(metaKey, isList, fileId, {
+          uploading: false,
+          error: msg,
+        });
+      }
+    },
+    [patchMetafieldFile],
+  );
+
+  const handleDropMetafieldFiles = useCallback(
+    (metaKey: string, isList: boolean, acceptedFiles: File[]) => {
+      if (acceptedFiles.length === 0) return;
+      // `crypto.randomUUID` is widely available in modern browsers; the
+      // fallback covers older mobile Safari in case someone's on iOS 14.
+      const makeId = (): string =>
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const pending = acceptedFiles.map((f) => ({
+        id: makeId(),
+        file: f,
+      }));
+      const toAdd: MetafieldFile[] = pending.map(({ id, file }) => ({
+        id,
+        name: file.name,
+        gid: "",
+        uploading: true,
+      }));
+      setMetafieldFiles((prev) => {
+        // Single file_reference replaces any prior entry; list appends.
+        const existing = isList ? (prev[metaKey] ?? []) : [];
+        return { ...prev, [metaKey]: [...existing, ...toAdd] };
+      });
+      for (const { id, file } of pending) {
+        void uploadMetafieldFile(metaKey, isList, id, file);
+      }
+    },
+    [uploadMetafieldFile],
+  );
+
+  const handleRemoveMetafieldFile = useCallback(
+    (metaKey: string, isList: boolean, fileId: string) => {
+      setMetafieldFiles((prev) => {
+        const cur = prev[metaKey] ?? [];
+        const next = cur.filter((f) => f.id !== fileId);
+        syncMetafieldFileValue(metaKey, isList, next);
+        return { ...prev, [metaKey]: next };
+      });
+    },
+    [syncMetafieldFileValue],
+  );
 
   // Submit
   const handleSubmit = useCallback(
@@ -1285,6 +1405,116 @@ export default function ProductBuilder() {
                       );
                     }
 
+                    // File reference fields (e.g. cutting ticket). Supports
+                    // both single `file_reference` and `list.file_reference`.
+                    // Uploads go through staged upload → fileCreate; the
+                    // resulting file gid (or JSON array of gids for list) is
+                    // what lands in the metafield value.
+                    if (
+                      mfType === "file_reference" ||
+                      mfType === "list.file_reference"
+                    ) {
+                      const isList = mfType === "list.file_reference";
+                      const files = metafieldFiles[metaKey] ?? [];
+                      const anyUploading = files.some((f) => f.uploading);
+                      // The per-metafield hint sits next to the affected
+                      // field; the global `anyMetafieldUploading` flag on
+                      // the Save buttons is the actual submit guard.
+                      return (
+                        <BlockStack key={metaKey} gap="200">
+                          <Text as="p" variant="bodyMd" fontWeight="medium">
+                            {def.name}
+                          </Text>
+                          {def.description && (
+                            <Text as="p" variant="bodySm" tone="subdued">
+                              {def.description}
+                            </Text>
+                          )}
+                          {/* Hide the dropzone for single-file types once a
+                              file is attached — user has to remove before
+                              replacing, matching the hero-image pattern. */}
+                          {(isList || files.length === 0) && (
+                            <DropZone
+                              onDrop={(_d, accepted) =>
+                                handleDropMetafieldFiles(
+                                  metaKey,
+                                  isList,
+                                  accepted,
+                                )
+                              }
+                              allowMultiple={isList}
+                            >
+                              <DropZone.FileUpload
+                                actionTitle={
+                                  isList ? "Add files" : "Add file"
+                                }
+                                actionHint={
+                                  isList
+                                    ? "Drop files here or click to upload"
+                                    : "Drop a file here or click to upload"
+                                }
+                              />
+                            </DropZone>
+                          )}
+                          {files.length > 0 && (
+                            <BlockStack gap="100">
+                              {files.map((f) => (
+                                <InlineStack
+                                  key={f.id}
+                                  align="space-between"
+                                  blockAlign="center"
+                                  gap="200"
+                                >
+                                  <BlockStack gap="050">
+                                    <Text as="span" variant="bodySm">
+                                      {f.name}
+                                    </Text>
+                                    {f.uploading && (
+                                      <Text
+                                        as="span"
+                                        variant="bodySm"
+                                        tone="subdued"
+                                      >
+                                        Uploading…
+                                      </Text>
+                                    )}
+                                    {f.error && (
+                                      <Text
+                                        as="span"
+                                        variant="bodySm"
+                                        tone="critical"
+                                      >
+                                        {f.error}
+                                      </Text>
+                                    )}
+                                  </BlockStack>
+                                  <Button
+                                    variant="plain"
+                                    tone="critical"
+                                    size="slim"
+                                    onClick={() =>
+                                      handleRemoveMetafieldFile(
+                                        metaKey,
+                                        isList,
+                                        f.id,
+                                      )
+                                    }
+                                  >
+                                    Remove
+                                  </Button>
+                                </InlineStack>
+                              ))}
+                            </BlockStack>
+                          )}
+                          {anyUploading && (
+                            <Text as="p" variant="bodySm" tone="subdued">
+                              Wait for uploads to finish before saving.
+                            </Text>
+                          )}
+                        </BlockStack>
+                      );
+                    }
+
                     // Number fields (integer / decimal)
                     if (mfType === "number_integer" || mfType === "number_decimal") {
                       return (
@@ -1531,7 +1761,12 @@ export default function ProductBuilder() {
             <Button
               onClick={() => handleSubmit("saveAndNew")}
               loading={isSubmitting}
-              disabled={!title || !effectiveVendor || !price}
+              disabled={
+                !title ||
+                !effectiveVendor ||
+                !price ||
+                anyMetafieldUploading
+              }
             >
               Save &amp; Create Another
             </Button>
@@ -1539,7 +1774,12 @@ export default function ProductBuilder() {
               variant="primary"
               onClick={() => handleSubmit("saveAndOpen")}
               loading={isSubmitting}
-              disabled={!title || !effectiveVendor || !price}
+              disabled={
+                !title ||
+                !effectiveVendor ||
+                !price ||
+                anyMetafieldUploading
+              }
             >
               Save &amp; View Product
             </Button>
