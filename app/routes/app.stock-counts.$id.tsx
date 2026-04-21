@@ -22,10 +22,10 @@ import {
   Banner,
   ButtonGroup,
   Divider,
-  Collapsible,
+  Select,
   Icon,
 } from "@shopify/polaris";
-import { ChevronDownIcon, ChevronRightIcon } from "@shopify/polaris-icons";
+import { SearchIcon } from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import {
@@ -38,6 +38,7 @@ import {
 } from "../services/stock-counts/stock-count-service.server";
 import { getLocations } from "../services/shopify-api/locations.server";
 import { BarcodeScanInput } from "../components/BarcodeScanInput";
+import { ProductGrid, type GridCell } from "../components/ProductGrid";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -58,17 +59,15 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   try {
     if (intent === "record") {
       const lineItemId = String(formData.get("lineItemId"));
-      const count = parseInt(String(formData.get("countedQuantity")), 10);
-      await recordCount(id, lineItemId, count);
-      return json({ ok: true as const });
-    }
-    if (intent === "increment") {
-      const lineItemId = String(formData.get("lineItemId"));
-      const delta = parseInt(
-        String(formData.get("delta") ?? "1"),
-        10,
-      );
-      await incrementCount(id, lineItemId, delta);
+      const raw = String(formData.get("countedQuantity"));
+      // Empty string → clear the count (countedQuantity back to null,
+      // i.e. "not counted yet"); a real number → record it.
+      if (raw === "") {
+        await recordCount(id, lineItemId, null);
+      } else {
+        const count = parseInt(raw, 10);
+        await recordCount(id, lineItemId, Number.isFinite(count) ? count : 0);
+      }
       return json({ ok: true as const });
     }
     if (intent === "scan") {
@@ -80,6 +79,9 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           scanResult: { found: false as const, code },
         });
       }
+      // Scan-to-line: mark this line as "seen" with quantity 1 if it
+      // hasn't been counted yet, otherwise +1 the existing count. Lets
+      // a user walk the floor with the scanner and tally multiples.
       await incrementCount(id, lineItemId, 1);
       return json({
         ok: true as const,
@@ -110,6 +112,8 @@ const STATUS_TONES: Record<
   abandoned: "critical",
 };
 
+type Sort = "vendor" | "product";
+
 export default function StockCountDetail() {
   const { sc, locationName } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -119,52 +123,80 @@ export default function StockCountDetail() {
   const revalidator = useRevalidator();
   const isBusy = navigation.state === "submitting";
 
-  // Optimistic counted state — UI updates immediately, background saves via fetcher
+  // Optimistic counts — UI updates immediately; background saves via fetcher.
+  // `null` = not counted yet (shows empty input + no green tick);
+  // `number` = counted (shows the value + green background).
   const [counts, setCounts] = useState<Record<string, number | null>>(() => {
     const init: Record<string, number | null> = {};
     for (const li of sc.lineItems) init[li.id] = li.countedQuantity;
     return init;
   });
 
-  // Sync counts back from the server after any mutation completes
   useEffect(() => {
     if (navigation.state === "idle" && actionData && "ok" in actionData) {
-      // Pick up server truth via revalidation
       revalidator.revalidate();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigation.state]);
 
-  const [showCounted, setShowCounted] = useState(false);
-  const [scanFeedback, setScanFeedback] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<Sort>("vendor");
+  type FeedbackTone = "success" | "critical" | "subdued";
+  const [scanFeedback, setScanFeedback] = useState<{
+    message: string;
+    tone: FeedbackTone;
+  } | null>(null);
 
-  const handleRecord = useCallback(
-    (lineItemId: string, val: string) => {
-      const n = Math.max(0, parseInt(val, 10));
-      const safe = Number.isFinite(n) ? n : 0;
-      setCounts((prev) => ({ ...prev, [lineItemId]: safe }));
+  const { byVariantId, byLineItemId } = useMemo(() => {
+    const byV = new Map<string, (typeof sc.lineItems)[number]>();
+    const byL = new Map<string, (typeof sc.lineItems)[number]>();
+    for (const li of sc.lineItems) {
+      byV.set(li.shopifyVariantId, li);
+      byL.set(li.id, li);
+    }
+    return { byVariantId: byV, byLineItemId: byL };
+  }, [sc.lineItems]);
+
+  // After the server revalidates (e.g. scan incremented), sync counts
+  // with whatever the DB now holds. Without this, a second scan that
+  // races the first's revalidate would see stale client state.
+  useEffect(() => {
+    setCounts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const li of sc.lineItems) {
+        if (next[li.id] !== li.countedQuantity) {
+          next[li.id] = li.countedQuantity;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [sc.lineItems]);
+
+  const persistCount = useCallback(
+    (lineItemId: string, next: number | null) => {
       const fd = new FormData();
       fd.set("intent", "record");
       fd.set("lineItemId", lineItemId);
-      fd.set("countedQuantity", String(safe));
+      // Empty string means "clear the count"; we distinguish null from 0
+      // because a user who counted zero is a signal ("nothing here") not
+      // the absence of a count.
+      fd.set("countedQuantity", next === null ? "" : String(next));
       fetcher.submit(fd, { method: "post" });
     },
     [fetcher],
   );
 
-  const handleIncrement = useCallback(
-    (lineItemId: string, delta: number) => {
-      setCounts((prev) => ({
-        ...prev,
-        [lineItemId]: Math.max(0, (prev[lineItemId] ?? 0) + delta),
-      }));
-      const fd = new FormData();
-      fd.set("intent", "increment");
-      fd.set("lineItemId", lineItemId);
-      fd.set("delta", String(delta));
-      fetcher.submit(fd, { method: "post" });
+  const handleCellChange = useCallback(
+    (variantId: string, raw: number) => {
+      const li = byVariantId.get(variantId);
+      if (!li) return;
+      const safe = Math.max(0, Math.floor(raw));
+      setCounts((prev) => ({ ...prev, [li.id]: safe }));
+      persistCount(li.id, safe);
     },
-    [fetcher],
+    [byVariantId, persistCount],
   );
 
   const handleScan = useCallback(
@@ -173,33 +205,38 @@ export default function StockCountDetail() {
       fd.set("intent", "scan");
       fd.set("code", code);
       fetcher.submit(fd, { method: "post" });
-      setScanFeedback(`Scanning ${code}…`);
+      setScanFeedback({ message: `Scanning ${code}…`, tone: "subdued" });
     },
     [fetcher],
   );
 
-  // Watch fetcher's scan result for feedback
   useEffect(() => {
     const data = fetcher.data;
-    if (!data) return;
-    if ("scanResult" in data && data.scanResult) {
-      if (data.scanResult.found) {
-        const line = sc.lineItems.find(
-          (l) => l.id === data.scanResult.lineItemId,
-        );
-        if (line) {
-          const next = (counts[line.id] ?? 0) + 1;
-          setCounts((prev) => ({ ...prev, [line.id]: next }));
-          setScanFeedback(
-            `✓ ${line.productTitle} — ${line.variantTitle}: counted ${next}`,
-          );
-        }
-      } else {
-        setScanFeedback(
-          `No line matches "${data.scanResult.code}".`,
-        );
+    if (!data || !("scanResult" in data) || !data.scanResult) return;
+    const res = data.scanResult as
+      | { found: true; lineItemId: string; code: string }
+      | { found: false; code: string };
+    if (res.found) {
+      const li = byLineItemId.get(res.lineItemId);
+      if (li) {
+        const next = (counts[li.id] ?? 0) + 1;
+        setCounts((prev) => ({ ...prev, [li.id]: next }));
+        setScanFeedback({
+          message: `✓ ${li.productTitle} — ${li.variantTitle}: counted ${next}`,
+          tone: "success",
+        });
+        // Auto-filter to the scanned product so the grid scrolls / narrows
+        // to show it — walking the floor with the scanner, you want
+        // confirmation the counted item actually showed up.
+        setSearch(li.productTitle);
       }
+    } else {
+      setScanFeedback({
+        message: `No line matches "${res.code}".`,
+        tone: "critical",
+      });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data]);
 
   const handleComplete = useCallback(() => {
@@ -221,17 +258,64 @@ export default function StockCountDetail() {
     submit(fd, { method: "post" });
   }, [submit]);
 
-  // Partition into counted / remaining
-  const { counted, remaining } = useMemo(() => {
-    const c: typeof sc.lineItems = [];
-    const r: typeof sc.lineItems = [];
-    for (const li of sc.lineItems) {
-      if (counts[li.id] !== null && counts[li.id] !== undefined) c.push(li);
-      else r.push(li);
-    }
-    return { counted: c, remaining: r };
-  }, [sc.lineItems, counts]);
+  // ProductGrid preserves input order within each row group, so the
+  // sort choice is applied here on the lineItems list.
+  const cells: GridCell[] = useMemo(() => {
+    const sorted = [...sc.lineItems].sort((a, b) => {
+      if (sort === "vendor") {
+        const va = (a.vendor ?? "zzz").toLowerCase();
+        const vb = (b.vendor ?? "zzz").toLowerCase();
+        if (va !== vb) return va.localeCompare(vb);
+      }
+      // Fallback: product title, then variant title
+      const pa = a.productTitle.toLowerCase();
+      const pb = b.productTitle.toLowerCase();
+      if (pa !== pb) return pa.localeCompare(pb);
+      return a.variantTitle.localeCompare(b.variantTitle);
+    });
 
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? sorted.filter(
+          (li) =>
+            li.productTitle.toLowerCase().includes(q) ||
+            li.variantTitle.toLowerCase().includes(q) ||
+            (li.vendor ?? "").toLowerCase().includes(q) ||
+            (li.sku ?? "").toLowerCase().includes(q) ||
+            (li.barcode ?? "").toLowerCase().includes(q),
+        )
+      : sorted;
+
+    return filtered.map((li) => {
+      let selectedOptions: Array<{ name: string; value: string }> = [];
+      if (li.variantOptions) {
+        try {
+          selectedOptions = JSON.parse(li.variantOptions);
+        } catch {
+          // Old rows pre-schema-change; fall back to variantTitle as a
+          // single unnamed option so the grid can still group them.
+          selectedOptions = [{ name: "Variant", value: li.variantTitle }];
+        }
+      }
+      return {
+        variantId: li.shopifyVariantId,
+        productId: li.shopifyProductId,
+        productTitle: li.productTitle,
+        variantTitle: li.variantTitle,
+        selectedOptions,
+        sku: li.sku,
+        stock: li.expectedQuantity,
+        value: counts[li.id] ?? null,
+      };
+    });
+  }, [sc.lineItems, counts, sort, search]);
+
+  // Totals reflect the whole count (ignoring search filter) — the header
+  // should show overall progress even while the grid is narrowed down.
+  const counted = sc.lineItems.filter(
+    (li) => counts[li.id] !== null && counts[li.id] !== undefined,
+  ).length;
+  const remaining = sc.lineItems.length - counted;
   const totalExpected = sc.lineItems.reduce(
     (s, li) => s + li.expectedQuantity,
     0,
@@ -251,6 +335,32 @@ export default function StockCountDetail() {
         })
       : null;
 
+  // Vendor grouping header for the grid. Only active when sort=vendor.
+  // Memoize the productId → vendor map so ProductGrid's groupBy stays
+  // O(1) per row instead of O(N) (scanning sc.lineItems each call).
+  const vendorByProduct = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const li of sc.lineItems) {
+      if (!m.has(li.shopifyProductId)) {
+        m.set(li.shopifyProductId, li.vendor || "Unknown vendor");
+      }
+    }
+    return m;
+  }, [sc.lineItems]);
+  const groupBy =
+    sort === "vendor"
+      ? (row: { productId: string }) =>
+          vendorByProduct.get(row.productId) ?? "Unknown vendor"
+      : undefined;
+
+  // Counted cells get a green tint — zero still counts as counted (null
+  // is "not counted yet"). Uses inset shadow so it's visible even inside
+  // the TextField's padding.
+  const getCellStyle = (cell: GridCell) =>
+    cell.value !== null
+      ? { background: "#e7f5ec", boxShadow: "inset 0 0 0 1px #8fd19e" }
+      : undefined;
+
   return (
     <Page
       title={sc.name}
@@ -269,11 +379,15 @@ export default function StockCountDetail() {
       <Layout>
         {completedResult && (
           <Layout.Section>
-            <Banner tone="success" title={`Count complete`}>
+            <Banner tone="success" title="Count complete">
               Applied {completedResult.applied} adjustment
               {completedResult.applied !== 1 ? "s" : ""} to Shopify.
               {completedResult.uncounted > 0 && (
-                <> {completedResult.uncounted} line(s) were not counted and were left unchanged (likely dead SKUs).</>
+                <>
+                  {" "}
+                  {completedResult.uncounted} line(s) were not counted and
+                  were left unchanged (likely dead SKUs).
+                </>
               )}
             </Banner>
           </Layout.Section>
@@ -284,7 +398,7 @@ export default function StockCountDetail() {
           </Layout.Section>
         )}
 
-        {/* Scan + Summary */}
+        {/* Summary + scan + search */}
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
@@ -294,7 +408,7 @@ export default function StockCountDetail() {
                     Counted / Remaining
                   </Text>
                   <Text as="p" variant="headingLg">
-                    {counted.length} / {remaining.length}
+                    {counted} / {remaining}
                   </Text>
                 </BlockStack>
                 <BlockStack gap="050">
@@ -328,24 +442,41 @@ export default function StockCountDetail() {
               {isActive && (
                 <>
                   <Divider />
-                  <BarcodeScanInput
-                    onScan={handleScan}
-                    label="Scan"
-                    placeholder="Scan a SKU or barcode to add +1…"
-                  />
+                  <InlineStack gap="300" wrap blockAlign="end">
+                    <div style={{ flex: "1 1 240px", minWidth: "240px" }}>
+                      <BarcodeScanInput
+                        onScan={handleScan}
+                        label="Scan"
+                        placeholder="Scan SKU or barcode — +1 to counted…"
+                      />
+                    </div>
+                    <div style={{ flex: "1 1 240px", minWidth: "240px" }}>
+                      <TextField
+                        label="Search"
+                        value={search}
+                        onChange={setSearch}
+                        placeholder="Product, variant, SKU, vendor…"
+                        autoComplete="off"
+                        prefix={<Icon source={SearchIcon} />}
+                        clearButton
+                        onClearButtonClick={() => setSearch("")}
+                      />
+                    </div>
+                    <div style={{ flex: "0 0 160px" }}>
+                      <Select
+                        label="Sort"
+                        options={[
+                          { label: "Vendor", value: "vendor" },
+                          { label: "Product", value: "product" },
+                        ]}
+                        value={sort}
+                        onChange={(v) => setSort(v as Sort)}
+                      />
+                    </div>
+                  </InlineStack>
                   {scanFeedback && (
-                    <Text
-                      as="p"
-                      variant="bodySm"
-                      tone={
-                        scanFeedback.startsWith("✓")
-                          ? "success"
-                          : scanFeedback.startsWith("No")
-                            ? "critical"
-                            : "subdued"
-                      }
-                    >
-                      {scanFeedback}
+                    <Text as="p" variant="bodySm" tone={scanFeedback.tone}>
+                      {scanFeedback.message}
                     </Text>
                   )}
                 </>
@@ -354,87 +485,27 @@ export default function StockCountDetail() {
           </Card>
         </Layout.Section>
 
-        {/* Remaining section */}
-        {remaining.length > 0 && (
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="300">
-                <InlineStack align="space-between" blockAlign="center">
-                  <Text as="h2" variant="headingMd">
-                    Remaining ({remaining.length})
-                  </Text>
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    Unmarked — might be dead SKUs
-                  </Text>
-                </InlineStack>
-                <BlockStack gap="200">
-                  {remaining.map((li) => (
-                    <LineRow
-                      key={li.id}
-                      line={li}
-                      value={counts[li.id]}
-                      onRecord={(v) => handleRecord(li.id, v)}
-                      onIncrement={(d) => handleIncrement(li.id, d)}
-                      disabled={!isActive}
-                    />
-                  ))}
-                </BlockStack>
-              </BlockStack>
-            </Card>
-          </Layout.Section>
-        )}
-
-        {/* Counted section — collapsed by default */}
-        {counted.length > 0 && (
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="300">
-                <div
-                  onClick={() => setShowCounted((v) => !v)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <InlineStack align="space-between" blockAlign="center">
-                    <InlineStack gap="200" blockAlign="center">
-                      <Icon
-                        source={
-                          showCounted ? ChevronDownIcon : ChevronRightIcon
-                        }
-                      />
-                      <Text as="h2" variant="headingMd">
-                        Counted ({counted.length})
-                      </Text>
-                    </InlineStack>
-                    <Text as="span" variant="bodySm" tone="subdued">
-                      {showCounted ? "Hide" : "Show"}
-                    </Text>
-                  </InlineStack>
-                </div>
-                <Collapsible
-                  id="counted"
-                  open={showCounted}
-                  transition={{
-                    duration: "150ms",
-                    timingFunction: "ease-in-out",
-                  }}
-                >
-                  <BlockStack gap="200">
-                    {counted.map((li) => (
-                      <LineRow
-                        key={li.id}
-                        line={li}
-                        value={counts[li.id]}
-                        onRecord={(v) => handleRecord(li.id, v)}
-                        onIncrement={(d) => handleIncrement(li.id, d)}
-                        disabled={!isActive}
-                        showVariance
-                      />
-                    ))}
-                  </BlockStack>
-                </Collapsible>
-              </BlockStack>
-            </Card>
-          </Layout.Section>
-        )}
+        {/* Grid */}
+        <Layout.Section>
+          <Card padding="0">
+            <div style={{ padding: "16px" }}>
+              <ProductGrid
+                cells={cells}
+                qtyLabel="Counted"
+                onCellChange={handleCellChange}
+                showColumns={{
+                  cost: false,
+                  retail: false,
+                  stock: true,
+                  onOrder: false,
+                }}
+                getCellStyle={getCellStyle}
+                groupBy={groupBy}
+                readonly={!isActive}
+              />
+            </div>
+          </Card>
+        </Layout.Section>
 
         {/* Complete / Abandon */}
         {isActive && (
@@ -442,21 +513,24 @@ export default function StockCountDetail() {
             <Card>
               <InlineStack align="space-between" blockAlign="center">
                 <Text as="p" variant="bodyMd">
-                  When you're done,{" "}
-                  <strong>Complete</strong> syncs counted quantities to
-                  Shopify. Uncounted lines are untouched.
+                  When you're done, <strong>Complete</strong> syncs counted
+                  quantities to Shopify. Uncounted lines are untouched.
                 </Text>
                 <ButtonGroup>
-                  <Button tone="critical" onClick={handleAbandon} loading={isBusy}>
+                  <Button
+                    tone="critical"
+                    onClick={handleAbandon}
+                    loading={isBusy}
+                  >
                     Abandon
                   </Button>
                   <Button
                     variant="primary"
                     onClick={handleComplete}
                     loading={isBusy}
-                    disabled={counted.length === 0}
+                    disabled={counted === 0}
                   >
-                    Complete ({counted.length} counted)
+                    Complete ({counted} counted)
                   </Button>
                 </ButtonGroup>
               </InlineStack>
@@ -468,95 +542,5 @@ export default function StockCountDetail() {
         </Layout.Section>
       </Layout>
     </Page>
-  );
-}
-
-function LineRow({
-  line,
-  value,
-  onRecord,
-  onIncrement,
-  disabled,
-  showVariance = false,
-}: {
-  line: {
-    id: string;
-    productTitle: string;
-    variantTitle: string;
-    sku: string | null;
-    expectedQuantity: number;
-  };
-  value: number | null | undefined;
-  onRecord: (v: string) => void;
-  onIncrement: (delta: number) => void;
-  disabled: boolean;
-  showVariance?: boolean;
-}) {
-  const variance = (value ?? 0) - line.expectedQuantity;
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        borderRadius: "6px",
-        border: "1px solid #e1e3e5",
-      }}
-    >
-      <InlineStack align="space-between" blockAlign="center" wrap={false}>
-        <BlockStack gap="050">
-          <Text as="p" variant="bodyMd" fontWeight="medium">
-            {line.productTitle}
-          </Text>
-          <Text as="p" variant="bodySm" tone="subdued">
-            {line.variantTitle}
-            {line.sku ? ` · ${line.sku}` : ""}
-            {` · expected ${line.expectedQuantity}`}
-          </Text>
-        </BlockStack>
-        <InlineStack gap="200" blockAlign="center">
-          {showVariance && value !== null && (
-            <Text
-              as="span"
-              variant="bodySm"
-              tone={
-                variance === 0
-                  ? "success"
-                  : variance < 0
-                    ? "critical"
-                    : undefined
-              }
-            >
-              {variance >= 0 ? "+" : ""}
-              {variance}
-            </Text>
-          )}
-          <Button
-            size="slim"
-            onClick={() => onIncrement(-1)}
-            disabled={disabled || (value ?? 0) <= 0}
-          >
-            −
-          </Button>
-          <div style={{ width: "72px" }}>
-            <TextField
-              label="Counted"
-              labelHidden
-              value={value === null || value === undefined ? "" : String(value)}
-              onChange={onRecord}
-              type="number"
-              min={0}
-              autoComplete="off"
-              disabled={disabled}
-            />
-          </div>
-          <Button
-            size="slim"
-            onClick={() => onIncrement(1)}
-            disabled={disabled}
-          >
-            +
-          </Button>
-        </InlineStack>
-      </InlineStack>
-    </div>
   );
 }

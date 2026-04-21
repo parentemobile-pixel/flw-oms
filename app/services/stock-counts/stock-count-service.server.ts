@@ -38,6 +38,7 @@ export async function createStockCount(
           title: string;
           sku: string | null;
           barcode: string | null;
+          selectedOptions: Array<{ name: string; value: string }>;
         };
       }>;
     };
@@ -64,6 +65,10 @@ export async function createStockCount(
                   title
                   sku
                   barcode
+                  selectedOptions {
+                    name
+                    value
+                  }
                 }
               }
             }
@@ -90,20 +95,24 @@ export async function createStockCount(
   const variants: Array<{
     productId: string;
     productTitle: string;
+    vendor: string;
     variantId: string;
     variantTitle: string;
     sku: string | null;
     barcode: string | null;
+    selectedOptions: Array<{ name: string; value: string }>;
   }> = [];
   for (const p of allProducts) {
     for (const v of p.variants.edges) {
       variants.push({
         productId: p.id,
         productTitle: p.title,
+        vendor: p.vendor,
         variantId: v.node.id,
         variantTitle: v.node.title,
         sku: v.node.sku,
         barcode: v.node.barcode,
+        selectedOptions: v.node.selectedOptions ?? [],
       });
     }
   }
@@ -125,9 +134,11 @@ export async function createStockCount(
         shopifyProductId: v.productId,
         shopifyVariantId: v.variantId,
         productTitle: v.productTitle,
+        vendor: v.vendor || null,
         variantTitle: v.variantTitle,
         sku: v.sku,
         barcode: v.barcode,
+        variantOptions: JSON.stringify(v.selectedOptions),
         expectedQuantity: level.quantities.available ?? 0,
       };
     })
@@ -180,15 +191,18 @@ export async function getStockCount(shop: string, id: string) {
 export async function recordCount(
   id: string,
   lineItemId: string,
-  countedQuantity: number,
+  // null clears a previously-saved count — the line goes back to
+  // "not counted yet" (empty grid cell, no green tick, won't be applied
+  // on Complete).
+  countedQuantity: number | null,
   countedBy: string | null = null,
 ) {
   return db.stockCountLineItem.update({
     where: { id: lineItemId },
     data: {
       countedQuantity,
-      countedAt: new Date(),
-      countedBy,
+      countedAt: countedQuantity === null ? null : new Date(),
+      countedBy: countedQuantity === null ? null : countedBy,
     },
   });
 }

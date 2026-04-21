@@ -260,9 +260,11 @@ model StockCountLineItem {
   shopifyProductId String
   shopifyVariantId String
   productTitle     String
+  vendor           String? // snapshot at count creation — drives grouping
   variantTitle     String
   sku              String?
   barcode          String?
+  variantOptions   String? // JSON [{name,value}] — drives sizes-as-columns grid
   expectedQuantity Int // snapshot at count creation
   countedQuantity  Int? // null until counted
   countedAt        DateTime?

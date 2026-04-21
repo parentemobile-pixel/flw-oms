@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { Fragment, useMemo, type CSSProperties } from "react";
 import { TextField, Text, InlineStack, Badge } from "@shopify/polaris";
 
 /**
@@ -38,8 +38,12 @@ export interface GridCell {
   stock?: number;
   onOrder?: number;
 
-  /** Current editable value for this cell (qty, new qty, etc.). */
-  value: number;
+  /**
+   * Current editable value for this cell. `null` renders an empty input —
+   * stock count uses this to distinguish "not counted yet" from "counted
+   * zero". For everything else pass a number.
+   */
+  value: number | null;
 }
 
 interface ProductGridProps {
@@ -65,6 +69,23 @@ interface ProductGridProps {
   allowNegative?: boolean;
   /** Readonly mode — disables all inputs (viewing an already-received PO). */
   readonly?: boolean;
+  /**
+   * Optional per-cell style override. Stock count uses this to paint
+   * counted cells (countedQuantity !== null) green so the user can see
+   * at a glance what's done and what remains.
+   */
+  getCellStyle?: (cell: GridCell) => CSSProperties | undefined;
+  /**
+   * Optional right-side group-by header. Stock count uses this to group
+   * rows by vendor. Callers return the header string for each row; rows
+   * with the same header get grouped (rendered with a section divider).
+   * Return null to include the row without a group header.
+   */
+  groupBy?: (row: {
+    productId: string;
+    productTitle: string;
+    cells: GridCell[];
+  }) => string | null;
 }
 
 const SIZE_ORDER = [
@@ -115,6 +136,8 @@ export function ProductGrid({
   min = 0,
   allowNegative = false,
   readonly = false,
+  getCellStyle,
+  groupBy,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
@@ -216,14 +239,60 @@ export function ProductGrid({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {(() => {
+            // Compute group labels once per row (avoids O(N^2) when the
+            // caller's groupBy is itself linear, as the stock count's
+            // vendor lookup is) and detect header transitions inline.
+            const groupLabels = groupBy
+              ? rows.map((row) =>
+                  groupBy({
+                    productId: row.productId,
+                    productTitle: row.productTitle,
+                    cells: Object.values(row.bySize),
+                  }),
+                )
+              : null;
+
+            return rows.map((row, rowIdx) => {
             const rowCells = Object.values(row.bySize);
             const rowTotal = computeRowTotal
               ? computeRowTotal(rowCells)
-              : rowCells.reduce((sum, c) => sum + c.value, 0);
+              : rowCells.reduce((sum, c) => sum + (c.value ?? 0), 0);
+
+            const groupLabel = groupLabels ? groupLabels[rowIdx] : null;
+            const prevGroupLabel =
+              groupLabels && rowIdx > 0 ? groupLabels[rowIdx - 1] : null;
+            const showGroupHeader =
+              groupLabel != null && groupLabel !== prevGroupLabel;
+            const colSpan =
+              1 +
+              (showColumns.cost ? 1 : 0) +
+              (showColumns.retail ? 1 : 0) +
+              (showColumns.stock ? 1 : 0) +
+              (showColumns.onOrder ? 1 : 0) +
+              sizes.length +
+              1;
 
             return (
-              <tr key={row.key} style={{ borderBottom: "1px solid #f1f1f1" }}>
+              <Fragment key={row.key}>
+              {showGroupHeader && (
+                <tr style={{ background: "#f6f6f7" }}>
+                  <td
+                    colSpan={colSpan}
+                    style={{
+                      padding: "8px 12px",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      color: "#4a4a4a",
+                    }}
+                  >
+                    {groupLabel}
+                  </td>
+                </tr>
+              )}
+              <tr style={{ borderBottom: "1px solid #f1f1f1" }}>
                 <td style={{ padding: "8px", fontWeight: 500 }}>
                   <InlineStack gap="100" blockAlign="center">
                     <Text as="span" variant="bodyMd">
@@ -271,12 +340,16 @@ export function ProductGrid({
                       </td>
                     );
                   }
+                  const cellStyle = getCellStyle?.(cell);
                   return (
-                    <td key={size} style={{ padding: "2px 4px" }}>
+                    <td
+                      key={size}
+                      style={{ padding: "2px 4px", ...(cellStyle ?? {}) }}
+                    >
                       <TextField
                         label={qtyLabel}
                         labelHidden
-                        value={String(cell.value)}
+                        value={cell.value === null ? "" : String(cell.value)}
                         onChange={(val) => {
                           const parsed = allowNegative
                             ? parseInt(val, 10)
@@ -305,8 +378,10 @@ export function ProductGrid({
                   {rowTotal.toFixed(rowTotalPrefix === "$" ? 2 : 0)}
                 </td>
               </tr>
+              </Fragment>
             );
-          })}
+            });
+          })()}
         </tbody>
       </table>
     </div>
