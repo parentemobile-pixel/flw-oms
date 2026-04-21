@@ -519,6 +519,17 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
       ? parseFloat(input.cost)
       : null;
 
+  // Inventory item payload for every new variant: always enable tracking
+  // (so subsequent adjustInventory calls actually move the numbers) and
+  // attach cost when present. Used for both the sized and zero-option
+  // variant paths.
+  const inventoryItemPayload = {
+    tracked: true,
+    ...(parsedCost != null && Number.isFinite(parsedCost) && parsedCost >= 0
+      ? { cost: parsedCost.toFixed(2) }
+      : {}),
+  };
+
   const variants = combos.map((combo) => {
     // Build SKU from prefix + option values
     let sku: string | undefined;
@@ -531,9 +542,7 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
       optionValues: combo,
       price: parseFloat(input.price),
       ...(sku ? { sku } : {}),
-      ...(parsedCost != null && Number.isFinite(parsedCost) && parsedCost >= 0
-        ? { inventoryItem: { cost: parsedCost.toFixed(2) } }
-        : {}),
+      inventoryItem: inventoryItemPayload,
     };
   });
 
@@ -541,6 +550,10 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
     title: input.title,
     vendor: input.vendor,
     ...(input.tags && input.tags.length > 0 ? { tags: input.tags } : {}),
+    // Always include variants so price + inventoryItem (tracked, cost) are
+    // set on create. When there are no product options, `variants` contains
+    // a single variant with empty optionValues — Shopify auto-creates a
+    // default option ("Title"/"Default Title") to match.
     ...(activeOptions.length > 0
       ? {
           productOptions: activeOptions.map((opt) => ({
@@ -549,7 +562,7 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
           })),
           variants,
         }
-      : {}),
+      : { variants }),
     ...(input.metafields && input.metafields.length > 0
       ? {
           metafields: input.metafields.map((mf) => ({
@@ -626,11 +639,27 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
           locationId: string;
           delta: number;
         }> = [];
+        // For a zero-option (single-variant) product, Shopify's auto-created
+        // default variant has selectedOptions = [{name:"Title",value:"Default Title"}].
+        // The form sends initialInventory under the empty-string key. Normalize
+        // so either side matches.
+        const normalizeKey = (opts: Array<{ name: string; value: string }>) => {
+          const joined = opts.map((o) => o.value).join("/");
+          if (/^default title$/i.test(joined)) return "";
+          return joined;
+        };
         for (const variant of withInv) {
-          const key = variant.selectedOptions
-            .map((o) => o.value)
-            .join("/");
-          const perLocation = input.initialInventory[key];
+          const key = normalizeKey(variant.selectedOptions);
+          // Fall back: if there's only one variant and the input has exactly
+          // one entry, use it regardless of key match.
+          const perLocation =
+            input.initialInventory[key] ??
+            (withInv.length === 1 &&
+            Object.keys(input.initialInventory).length === 1
+              ? input.initialInventory[
+                  Object.keys(input.initialInventory)[0]
+                ]
+              : undefined);
           if (!perLocation) continue;
           for (const [locationId, qty] of Object.entries(perLocation)) {
             if (qty && qty > 0) {

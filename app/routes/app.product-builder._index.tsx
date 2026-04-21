@@ -314,6 +314,34 @@ export default function ProductBuilder() {
     variantCount: number;
   } | null>(null);
 
+  // Reset every form field back to its pristine state. Used by both
+  // "Save & Create Another" (auto-invoked after a successful save) and
+  // "Create new product" on the post-saveAndOpen banner.
+  const resetForm = useCallback(() => {
+    setTitle("");
+    setVendor("");
+    setVendorInput("");
+    setPrice("");
+    setCost("");
+    setSkuPrefix("");
+    setMetafieldValues({});
+    setImageFile(null);
+    setImagePreview("");
+    setUploadedImageUrl("");
+    setOptions([
+      { id: "size", name: "Size", values: [], newValue: "" },
+      { id: "color", name: "Color", values: [], newValue: "" },
+    ]);
+    setSelectedPubs(defaultPublicationIds);
+    setSetStartingInventory(false);
+    setStartingInventory_({});
+    setIsFLWBrand("");
+    setIsFLWCore("");
+    setHasSeason("");
+    setSelectedSeason("");
+    setSuccessBanner(null);
+  }, [defaultPublicationIds]);
+
   // Clear form on successful "Save & Create Another"
   useEffect(() => {
     if (
@@ -326,52 +354,9 @@ export default function ProductBuilder() {
         productNumericId: String(actionData.productNumericId || ""),
         variantCount: Number(actionData.variantCount),
       });
-      // Reset form
-      setTitle("");
-      setVendor("");
-      setVendorInput("");
-      setPrice("");
-      setCost("");
-      setSkuPrefix("");
-      setMetafieldValues({});
-      setImageFile(null);
-      setImagePreview("");
-      setUploadedImageUrl("");
-      setOptions([
-        { id: "size", name: "Size", values: [], newValue: "" },
-        { id: "color", name: "Color", values: [], newValue: "" },
-      ]);
-      setSelectedPubs(defaultPublicationIds);
-      setSetStartingInventory(false);
-      setStartingInventory_({});
-      setIsFLWBrand("");
-      setIsFLWCore("");
-      setHasSeason("");
-      setSelectedSeason("");
+      resetForm();
     }
-  }, [actionData, publications, defaultPublicationIds]);
-
-  // When "Save & View" succeeds, redirect the user into the Shopify admin's
-  // product page so they can immediately see what was just created. We
-  // navigate the whole embedded-app iframe (target=_top) to the shopify:
-  // URL scheme; App Bridge intercepts and deep-links into the admin.
-  useEffect(() => {
-    if (
-      actionData &&
-      "success" in actionData &&
-      actionData.intent === "saveAndOpen" &&
-      actionData.productNumericId
-    ) {
-      const url = `shopify:admin/products/${actionData.productNumericId}`;
-      // Prefer the top frame so the Shopify admin handles the link; fall
-      // back to current window if top isn't accessible (dev/preview).
-      try {
-        (window.top ?? window).location.href = url;
-      } catch {
-        window.location.href = url;
-      }
-    }
-  }, [actionData]);
+  }, [actionData, resetForm]);
 
   // Build tags from tagging questions
   const computedTags: string[] = [];
@@ -676,6 +661,11 @@ export default function ProductBuilder() {
       const sku = skuPrefix ? [skuPrefix, ...skuParts].join("-") : "";
       variantPreview.push([...combo, sku, price ? `$${price}` : ""]);
     }
+  } else {
+    // Zero-option (single-variant) product — one default row so the
+    // variant preview + starting-inventory table still render something.
+    const sku = skuPrefix ?? "";
+    variantPreview.push([sku, price ? `$${price}` : ""]);
   }
 
   const previewHeadings = [
@@ -733,32 +723,15 @@ export default function ProductBuilder() {
           </Layout.Section>
         )}
 
-        {/* Action error / Save & Open success */}
+        {/* Action error banner stays near the top so problems are visible */}
         {actionData && "error" in actionData && (
           <Layout.Section>
             <Banner tone="critical">{String(actionData.error)}</Banner>
           </Layout.Section>
         )}
-        {actionData &&
-          "success" in actionData &&
-          actionData.intent === "saveAndOpen" && (
-            <Layout.Section>
-              <Banner
-                tone="success"
-                action={
-                  actionData.productNumericId
-                    ? {
-                        content: "View in Shopify",
-                        url: `shopify:admin/products/${actionData.productNumericId}`,
-                      }
-                    : undefined
-                }
-              >
-                Product created with {Number(actionData.variantCount)} variant
-                {Number(actionData.variantCount) !== 1 ? "s" : ""}!
-              </Banner>
-            </Layout.Section>
-          )}
+        {/* Save & View success banner is rendered at the BOTTOM of the page
+            so the user sees it after the form they just submitted — see the
+            bottom of the Layout for where it lands. */}
 
         {/* Product Details + Image */}
         <Layout.Section>
@@ -841,11 +814,6 @@ export default function ProductBuilder() {
                         Refresh
                       </Button>
                     </InlineStack>
-                    <Text as="p" variant="bodySm" tone="subdued">
-                      Vendor list refreshes automatically every 15 min. Click
-                      Refresh if you just added a vendor in the Shopify admin
-                      and don&apos;t see it yet.
-                    </Text>
                   </FormLayout>
                 </BlockStack>
               </div>
@@ -1075,15 +1043,13 @@ export default function ProductBuilder() {
                               </ButtonGroup>
                             </InlineStack>
                           )}
-                          {options.length > 1 && (
-                            <Button
-                              icon={DeleteIcon}
-                              variant="plain"
-                              tone="critical"
-                              onClick={() => handleRemoveOption(option.id)}
-                              accessibilityLabel="Remove option"
-                            />
-                          )}
+                          <Button
+                            icon={DeleteIcon}
+                            variant="plain"
+                            tone="critical"
+                            onClick={() => handleRemoveOption(option.id)}
+                            accessibilityLabel="Remove option"
+                          />
                         </InlineStack>
                       </InlineStack>
 
@@ -1539,6 +1505,39 @@ export default function ProductBuilder() {
             </Button>
           </InlineStack>
         </Layout.Section>
+
+        {/* Save & View success banner lives at the BOTTOM of the page so
+            it appears right where the user's eye is after clicking Save. */}
+        {actionData &&
+          "success" in actionData &&
+          actionData.intent === "saveAndOpen" && (
+            <Layout.Section>
+              <Banner
+                tone="success"
+                title={`Product &ldquo;${String(actionData.title)}&rdquo; created with ${Number(
+                  actionData.variantCount,
+                )} variant${Number(actionData.variantCount) !== 1 ? "s" : ""}`}
+                action={
+                  actionData.productNumericId
+                    ? {
+                        content: "View product in Shopify",
+                        url: `shopify:admin/products/${actionData.productNumericId}`,
+                      }
+                    : undefined
+                }
+                secondaryAction={{
+                  content: "Create another product",
+                  onAction: resetForm,
+                }}
+              >
+                <p>
+                  Use &ldquo;View product&rdquo; to open the Shopify admin,
+                  or &ldquo;Create another&rdquo; to clear the form and
+                  start a new one.
+                </p>
+              </Banner>
+            </Layout.Section>
+          )}
 
         {/* Bottom spacer */}
         <Layout.Section>
