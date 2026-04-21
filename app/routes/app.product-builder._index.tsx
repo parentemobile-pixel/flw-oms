@@ -244,19 +244,22 @@ export default function ProductBuilder() {
   const loaderData = useLoaderData<typeof loader>();
   const vendors = loaderData?.vendors || [];
   const metafieldDefs = (loaderData?.metafieldDefs || []) as MetafieldDefinition[];
-  // Skip metafield definitions that match what we already handle as product
-  // options / variants (Size, Color). A merchant who created shopify
-  // metafields for these before using the builder otherwise ends up with
-  // two places to edit the same value.
-  const isVariantHandled = (def: MetafieldDefinition): boolean => {
+  // Skip metafield definitions that don't belong in the Product Builder:
+  //   - Size / Color: already handled as product options / variants, so
+  //     showing them as metafields gives two places to edit the same value.
+  //   - Product rating / rating count: Shopify's standard review
+  //     metafields, written by review apps at runtime — nothing the
+  //     merchandiser should ever fill in on create.
+  const isBuilderHiddenMetafield = (def: MetafieldDefinition): boolean => {
     const hay = `${def.namespace} ${def.key} ${def.name}`.toLowerCase();
     return (
       /\bsize\b|\bsizes\b/.test(hay) ||
-      /\bcolor\b|\bcolour\b|\bcolors\b|\bcolours\b/.test(hay)
+      /\bcolor\b|\bcolour\b|\bcolors\b|\bcolours\b/.test(hay) ||
+      /\brating\b|\bratings\b/.test(hay)
     );
   };
   const visibleMetafieldDefs = metafieldDefs.filter(
-    (def) => !isVariantHandled(def),
+    (def) => !isBuilderHiddenMetafield(def),
   );
   const existingOptions = (loaderData?.existingOptions || {}) as ExistingOptionValues;
   const publications = (loaderData?.publications || []) as Publication[];
