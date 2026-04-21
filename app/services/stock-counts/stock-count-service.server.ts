@@ -359,3 +359,22 @@ export async function abandonStockCount(shop: string, id: string) {
     data: { status: "abandoned", completedAt: new Date() },
   });
 }
+
+/**
+ * Hard-delete a stock count and its line items. Use when a count was
+ * created in error or the user wants to clear history. Does NOT reverse
+ * any Shopify inventory adjustments already applied — completed counts
+ * have already written to Shopify and those adjustments live in
+ * InventoryAdjustmentSession (preserved).
+ */
+export async function deleteStockCount(shop: string, id: string) {
+  // scope-check: don't let a delete from one shop nuke another shop's
+  // row if an id ever collides.
+  const existing = await db.stockCount.findFirst({
+    where: { shop, id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Stock count not found");
+  // Line items cascade via the relation's onDelete: Cascade.
+  await db.stockCount.delete({ where: { id } });
+}

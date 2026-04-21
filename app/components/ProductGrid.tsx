@@ -86,6 +86,15 @@ interface ProductGridProps {
     productTitle: string;
     cells: GridCell[];
   }) => string | null;
+  /**
+   * Fix the column set to this list of sizes (in order), regardless of
+   * which sizes actually appear in the cells. Cells whose size falls
+   * outside this list get rendered as inline "extra size" inputs in the
+   * row's first column, so a "One Size" hat or a stray 3XL doesn't widen
+   * the table for every other row. Pass undefined to derive columns from
+   * the cells (the original behavior).
+   */
+  sizeColumns?: string[];
 }
 
 const SIZE_ORDER = [
@@ -119,6 +128,12 @@ interface GroupedRow {
   productTitle: string;
   nonSizeLabel: string;
   bySize: Record<string, GridCell>;
+  /**
+   * Cells whose size doesn't match any `sizeColumns` entry — get
+   * rendered inline with the row label. Empty when `sizeColumns` is
+   * unset (all sizes go into their own column in that case).
+   */
+  overflowCells: Array<{ size: string; cell: GridCell }>;
   // Summed across all cells in the row for display
   cost: number;
   retail: number;
@@ -138,17 +153,22 @@ export function ProductGrid({
   readonly = false,
   getCellStyle,
   groupBy,
+  sizeColumns,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
     const groups: Record<string, GroupedRow> = {};
+    // Normalize the fixed column list once so every cell can quickly
+    // check membership without repeated .toUpperCase().
+    const fixedCols = sizeColumns?.map((s) => s.toUpperCase());
+    const isFixedSize = (s: string) =>
+      !fixedCols || fixedCols.includes(s.toUpperCase());
 
     for (const cell of cells) {
       const sizeOpt = cell.selectedOptions.find(
         (o) => o.name.toLowerCase() === "size",
       );
       const sizeVal = sizeOpt?.value || "Default";
-      sizeSet.add(sizeVal);
 
       const nonSizeLabel = cell.selectedOptions
         .filter((o) => o.name.toLowerCase() !== "size")
@@ -164,13 +184,20 @@ export function ProductGrid({
           productTitle: cell.productTitle,
           nonSizeLabel,
           bySize: {},
+          overflowCells: [],
           cost: 0,
           retail: 0,
           stock: 0,
           onOrder: 0,
         };
       }
-      groups[rowKey].bySize[sizeVal] = cell;
+      if (isFixedSize(sizeVal)) {
+        sizeSet.add(sizeVal);
+        groups[rowKey].bySize[sizeVal] = cell;
+      } else {
+        // Overflow: too obscure / non-apparel to deserve a column.
+        groups[rowKey].overflowCells.push({ size: sizeVal, cell });
+      }
       // Aggregate row info — sum where it makes sense (stock), take max/first for price
       const r = groups[rowKey];
       r.stock += cell.stock ?? 0;
@@ -179,11 +206,18 @@ export function ProductGrid({
       if (cell.retail && !r.retail) r.retail = cell.retail;
     }
 
+    // If sizeColumns were explicitly passed, honor their order exactly
+    // (empty columns still render so the table layout stays consistent
+    // across rows). Otherwise derive the order from what we saw.
+    const finalSizes = fixedCols
+      ? sizeColumns!.slice()
+      : [...sizeSet].sort(compareSizes);
+
     return {
       rows: Object.values(groups),
-      sizes: [...sizeSet].sort(compareSizes),
+      sizes: finalSizes,
     };
-  }, [cells]);
+  }, [cells, sizeColumns]);
 
   if (cells.length === 0) {
     return (
@@ -302,6 +336,59 @@ export function ProductGrid({
                       <Badge tone="info">{row.nonSizeLabel}</Badge>
                     )}
                   </InlineStack>
+                  {row.overflowCells.length > 0 && (
+                    <div style={{ marginTop: "4px" }}>
+                      <InlineStack gap="200" wrap blockAlign="center">
+                        {row.overflowCells.map(({ size, cell }) => {
+                          const cellStyle = getCellStyle?.(cell);
+                          return (
+                            <InlineStack
+                              key={cell.variantId}
+                              gap="100"
+                              blockAlign="center"
+                              wrap={false}
+                            >
+                              <Text
+                                as="span"
+                                variant="bodySm"
+                                tone="subdued"
+                              >
+                                {size}
+                              </Text>
+                              <div
+                                style={{
+                                  width: "64px",
+                                  ...(cellStyle ?? {}),
+                                  borderRadius: "4px",
+                                }}
+                              >
+                                <TextField
+                                  label={qtyLabel}
+                                  labelHidden
+                                  value={
+                                    cell.value === null ? "" : String(cell.value)
+                                  }
+                                  onChange={(val) => {
+                                    const parsed = allowNegative
+                                      ? parseInt(val, 10)
+                                      : Math.max(min, parseInt(val, 10) || 0);
+                                    onCellChange(
+                                      cell.variantId,
+                                      Number.isFinite(parsed) ? parsed : 0,
+                                    );
+                                  }}
+                                  type="number"
+                                  min={minAttr}
+                                  autoComplete="off"
+                                  disabled={readonly}
+                                />
+                              </div>
+                            </InlineStack>
+                          );
+                        })}
+                      </InlineStack>
+                    </div>
+                  )}
                 </td>
                 {showColumns.cost && (
                   <td style={{ padding: "8px", textAlign: "right" }}>

@@ -397,6 +397,15 @@ export default function StockCountDetail() {
             <Banner tone="critical">{actionData.error as string}</Banner>
           </Layout.Section>
         )}
+        {isActive && (
+          <Layout.Section>
+            <Banner tone="info" title="Draft — Shopify is not updated yet">
+              Counts are saved here as you go, but Shopify inventory stays
+              put until you click <strong>Complete</strong>. You can pause
+              and come back later; nothing is applied until you finalize.
+            </Banner>
+          </Layout.Section>
+        )}
 
         {/* Summary + scan + search */}
         <Layout.Section>
@@ -499,6 +508,10 @@ export default function StockCountDetail() {
                   stock: true,
                   onOrder: false,
                 }}
+                // Keep the column set to the common apparel sizes — rarer
+                // sizes (OS, 3XL, numeric) render inline in the row label
+                // so one odd variant doesn't widen every row.
+                sizeColumns={["XS", "S", "M", "L", "XL", "2XL"]}
                 getCellStyle={getCellStyle}
                 groupBy={groupBy}
                 readonly={!isActive}
