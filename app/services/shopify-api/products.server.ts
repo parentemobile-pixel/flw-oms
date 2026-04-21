@@ -67,66 +67,128 @@ export async function getProducts(
   return data.data.products;
 }
 
-// Fetch all unique vendors from the shop. Uses Shopify's authoritative
-// `shop.productVendors` connection (a StringConnection — edge.node is the
-// vendor name string directly). Paginates until hasNextPage is false so we
-// get every vendor, not just the ones whose products happen to be in the
-// first N products returned by the generic products query.
-const VENDORS_QUERY = `#graphql
+// Preferred source: Shopify's `shop.productVendors` connection — a
+// StringConnection of every unique vendor string in the shop. Uses the
+// `nodes` shortcut (no edge wrapper) for brevity. Requires `read_products`.
+const VENDORS_PRIMARY_QUERY = `#graphql
   query GetVendors($first: Int!, $after: String) {
     shop {
       productVendors(first: $first, after: $after) {
-        edges {
-          node
-          cursor
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
+        nodes
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 `;
+
+// Fallback: walk the product catalog and collect unique vendor fields.
+// Used when the primary query fails (wrong scope, API change, etc.).
+// Paginates so it's not limited to 250 products.
+const VENDORS_FALLBACK_QUERY = `#graphql
+  query GetVendorsFallback($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      edges { node { vendor } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+async function fetchVendorsPrimary(
+  admin: AdminApiContext,
+): Promise<string[]> {
+  const vendors: string[] = [];
+  let after: string | null = null;
+  let hasNext = true;
+  while (hasNext) {
+    const response = await admin.graphql(VENDORS_PRIMARY_QUERY, {
+      variables: { first: 250, after },
+    });
+    const body = (await response.json()) as {
+      data?: {
+        shop?: {
+          productVendors?: {
+            nodes?: string[];
+            pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+          };
+        };
+      };
+      errors?: Array<{ message: string; extensions?: unknown }>;
+    };
+    if (body.errors && body.errors.length > 0) {
+      const msg = body.errors.map((e) => e.message).join("; ");
+      console.error("[getVendors] shop.productVendors errors:", msg);
+      throw new Error(msg);
+    }
+    const pv = body.data?.shop?.productVendors;
+    if (!pv) {
+      console.warn(
+        "[getVendors] shop.productVendors missing from response — " +
+          "schema might have changed or scope is wrong.",
+      );
+      throw new Error("missing data.shop.productVendors");
+    }
+    for (const v of pv.nodes ?? []) {
+      if (v) vendors.push(v);
+    }
+    hasNext = pv.pageInfo?.hasNextPage ?? false;
+    after = pv.pageInfo?.endCursor ?? null;
+  }
+  return [...new Set(vendors)].filter(Boolean).sort();
+}
+
+async function fetchVendorsFallback(
+  admin: AdminApiContext,
+): Promise<string[]> {
+  const vendors: string[] = [];
+  let after: string | null = null;
+  let hasNext = true;
+  let pages = 0;
+  while (hasNext && pages < 20) {
+    pages++;
+    const response = await admin.graphql(VENDORS_FALLBACK_QUERY, {
+      variables: { first: 250, after },
+    });
+    const body = (await response.json()) as any;
+    const page = body?.data?.products;
+    if (!page) break;
+    for (const edge of page.edges ?? []) {
+      if (edge?.node?.vendor) vendors.push(edge.node.vendor);
+    }
+    hasNext = page.pageInfo?.hasNextPage ?? false;
+    after = page.pageInfo?.endCursor ?? null;
+  }
+  return [...new Set(vendors)].filter(Boolean).sort();
+}
 
 export async function getVendors(
   admin: AdminApiContext,
   shop?: string,
 ): Promise<string[]> {
   const fetcher = async (): Promise<string[]> => {
-    const vendors: string[] = [];
-    let after: string | null = null;
-    let hasNext = true;
-    while (hasNext) {
-      const response = await admin.graphql(VENDORS_QUERY, {
-        variables: { first: 250, after },
-      });
-      const data = (await response.json()) as {
-        data?: {
-          shop?: {
-            productVendors?: {
-              edges?: Array<{ node: string }>;
-              pageInfo?: { hasNextPage: boolean; endCursor: string | null };
-            };
-          };
-        };
-        errors?: Array<{ message: string }>;
-      };
-      if (data.errors && data.errors.length > 0) {
-        throw new Error(
-          "shop.productVendors failed: " +
-            data.errors.map((e) => e.message).join("; "),
-        );
-      }
-      const pv = data.data?.shop?.productVendors;
-      if (!pv) break;
-      for (const edge of pv.edges ?? []) {
-        if (edge.node) vendors.push(edge.node);
-      }
-      hasNext = pv.pageInfo?.hasNextPage ?? false;
-      after = pv.pageInfo?.endCursor ?? null;
+    // Try the authoritative source first.
+    try {
+      const vendors = await fetchVendorsPrimary(admin);
+      console.log(
+        `[getVendors] shop.productVendors returned ${vendors.length} vendors`,
+      );
+      if (vendors.length > 0) return vendors;
+      // Empty — odd, fall through to the product-scan fallback so a
+      // freshly installed shop with products but no named vendors still
+      // produces something (though usually empty is genuinely empty).
+      console.warn(
+        "[getVendors] shop.productVendors returned 0 — trying fallback",
+      );
+    } catch (error) {
+      console.warn(
+        "[getVendors] primary failed, falling back to product scan:",
+        error,
+      );
     }
-    return [...new Set(vendors)].filter(Boolean).sort();
+    const vendors = await fetchVendorsFallback(admin);
+    console.log(
+      `[getVendors] fallback product-scan returned ${vendors.length} vendors`,
+    );
+    return vendors;
   };
 
   // Cached path (preferred). Falls back to direct fetch if no shop given.
