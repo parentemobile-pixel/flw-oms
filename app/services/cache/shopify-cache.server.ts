@@ -51,11 +51,15 @@ export async function invalidateCache(shop: string, keys: string[]): Promise<voi
 
 /** Convenience TTLs (in minutes) */
 export const CACHE_TTL = {
-  VENDORS: 60,
+  // Short TTL on vendor/option lists — they change when a user adds a
+  // product or a new vendor in Shopify admin directly, and "my new vendor
+  // isn't showing up yet" is a high-friction failure mode. 15 min is a
+  // reasonable compromise vs. fetching on every page load.
+  VENDORS: 15,
+  OPTION_VALUES: 15,
   PUBLICATIONS: 60 * 12, // rarely changes
   METAFIELD_DEFINITIONS: 60 * 12,
   LOCATIONS: 60 * 24, // almost never changes
-  OPTION_VALUES: 60,
 } as const;
 
 /** Standard cache keys — using constants keeps usages consistent */

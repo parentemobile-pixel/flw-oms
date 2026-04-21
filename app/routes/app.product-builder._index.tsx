@@ -4,6 +4,8 @@ import { json } from "@remix-run/node";
 import {
   useLoaderData,
   useActionData,
+  useFetcher,
+  useRevalidator,
   useSubmit,
   useNavigation,
   useRouteError,
@@ -103,6 +105,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  // Refresh vendor list — clears the cached copy so the NEXT loader run
+  // (triggered by revalidation on the client) pulls fresh from Shopify.
+  // Used when a user adds a vendor outside our app (directly in the
+  // Shopify admin) and needs to see it in the dropdown.
+  if (intent === "refresh-vendors") {
+    const { invalidateCache, CACHE_KEYS } = await import(
+      "../services/cache/shopify-cache.server"
+    );
+    await invalidateCache(session.shop, [
+      CACHE_KEYS.VENDORS,
+      CACHE_KEYS.OPTION_VALUES,
+    ]);
+    return json({ refreshed: true as const });
+  }
 
   const title = formData.get("title") as string;
   const vendor = formData.get("vendor") as string;
@@ -225,6 +242,30 @@ export default function ProductBuilder() {
   const submit = useSubmit();
   const navigation = useNavigation();
   const isSubmitting = navigation.state === "submitting";
+
+  // Separate fetcher for the "refresh vendors" action so it doesn't collide
+  // with the main form-submit navigation lifecycle.
+  const refreshFetcher = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
+  const isRefreshingVendors = refreshFetcher.state !== "idle";
+
+  const handleRefreshVendors = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "refresh-vendors");
+    refreshFetcher.submit(fd, { method: "post" });
+  }, [refreshFetcher]);
+
+  // When the refresh fetcher finishes, re-run the loader so the new vendor
+  // list reaches the component.
+  useEffect(() => {
+    if (
+      refreshFetcher.state === "idle" &&
+      refreshFetcher.data &&
+      "refreshed" in refreshFetcher.data
+    ) {
+      revalidator.revalidate();
+    }
+  }, [refreshFetcher.state, refreshFetcher.data, revalidator]);
 
   const [title, setTitle] = useState("");
   const [vendor, setVendor] = useState("");
@@ -770,25 +811,41 @@ export default function ProductBuilder() {
                       autoComplete="off"
                       requiredIndicator
                     />
-                    <Autocomplete
-                      options={vendorOptions}
-                      selected={vendor ? [vendor] : []}
-                      onSelect={handleVendorSelect}
-                      textField={
-                        <Autocomplete.TextField
-                          label="Vendor"
-                          value={vendorInput}
-                          onChange={(val: string) => {
-                            setVendorInput(val);
-                            setVendor(val);
-                          }}
-                          placeholder="Search or type vendor name..."
-                          autoComplete="off"
-                          requiredIndicator
-                          prefix={<Icon source={SearchIcon} />}
+                    <InlineStack gap="200" blockAlign="end">
+                      <div style={{ flex: 1 }}>
+                        <Autocomplete
+                          options={vendorOptions}
+                          selected={vendor ? [vendor] : []}
+                          onSelect={handleVendorSelect}
+                          textField={
+                            <Autocomplete.TextField
+                              label="Vendor"
+                              value={vendorInput}
+                              onChange={(val: string) => {
+                                setVendorInput(val);
+                                setVendor(val);
+                              }}
+                              placeholder="Search or type vendor name..."
+                              autoComplete="off"
+                              requiredIndicator
+                              prefix={<Icon source={SearchIcon} />}
+                            />
+                          }
                         />
-                      }
-                    />
+                      </div>
+                      <Button
+                        onClick={handleRefreshVendors}
+                        loading={isRefreshingVendors}
+                        disabled={isRefreshingVendors}
+                      >
+                        Refresh
+                      </Button>
+                    </InlineStack>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Vendor list refreshes automatically every 15 min. Click
+                      Refresh if you just added a vendor in the Shopify admin
+                      and don&apos;t see it yet.
+                    </Text>
                   </FormLayout>
                 </BlockStack>
               </div>
