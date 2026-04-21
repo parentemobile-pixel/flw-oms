@@ -67,13 +67,22 @@ export async function getProducts(
   return data.data.products;
 }
 
-// Fetch all unique vendors from the shop
+// Fetch all unique vendors from the shop. Uses Shopify's authoritative
+// `shop.productVendors` connection (a StringConnection — edge.node is the
+// vendor name string directly). Paginates until hasNextPage is false so we
+// get every vendor, not just the ones whose products happen to be in the
+// first N products returned by the generic products query.
 const VENDORS_QUERY = `#graphql
-  query GetVendors($first: Int!) {
-    products(first: $first) {
-      edges {
-        node {
-          vendor
+  query GetVendors($first: Int!, $after: String) {
+    shop {
+      productVendors(first: $first, after: $after) {
+        edges {
+          node
+          cursor
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
     }
@@ -84,15 +93,40 @@ export async function getVendors(
   admin: AdminApiContext,
   shop?: string,
 ): Promise<string[]> {
-  const fetcher = async () => {
-    const response = await admin.graphql(VENDORS_QUERY, {
-      variables: { first: 250 },
-    });
-    const data = await response.json();
-    const vendors = data.data.products.edges.map(
-      (edge: { node: { vendor: string } }) => edge.node.vendor,
-    );
-    return [...new Set(vendors)].filter(Boolean).sort() as string[];
+  const fetcher = async (): Promise<string[]> => {
+    const vendors: string[] = [];
+    let after: string | null = null;
+    let hasNext = true;
+    while (hasNext) {
+      const response = await admin.graphql(VENDORS_QUERY, {
+        variables: { first: 250, after },
+      });
+      const data = (await response.json()) as {
+        data?: {
+          shop?: {
+            productVendors?: {
+              edges?: Array<{ node: string }>;
+              pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+            };
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      if (data.errors && data.errors.length > 0) {
+        throw new Error(
+          "shop.productVendors failed: " +
+            data.errors.map((e) => e.message).join("; "),
+        );
+      }
+      const pv = data.data?.shop?.productVendors;
+      if (!pv) break;
+      for (const edge of pv.edges ?? []) {
+        if (edge.node) vendors.push(edge.node);
+      }
+      hasNext = pv.pageInfo?.hasNextPage ?? false;
+      after = pv.pageInfo?.endCursor ?? null;
+    }
+    return [...new Set(vendors)].filter(Boolean).sort();
   };
 
   // Cached path (preferred). Falls back to direct fetch if no shop given.
