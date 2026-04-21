@@ -121,6 +121,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ refreshed: true as const });
   }
 
+  // Same pattern for metafield definitions — the user may add a new
+  // metafield definition in Shopify admin and want it to show up here.
+  if (intent === "refresh-metafields") {
+    const { invalidateCache, CACHE_KEYS } = await import(
+      "../services/cache/shopify-cache.server"
+    );
+    await invalidateCache(session.shop, [CACHE_KEYS.METAFIELD_DEFINITIONS]);
+    return json({ refreshed: true as const });
+  }
+
   const title = formData.get("title") as string;
   const vendor = formData.get("vendor") as string;
   const price = formData.get("price") as string;
@@ -233,6 +243,20 @@ export default function ProductBuilder() {
   const loaderData = useLoaderData<typeof loader>();
   const vendors = loaderData?.vendors || [];
   const metafieldDefs = (loaderData?.metafieldDefs || []) as MetafieldDefinition[];
+  // Skip metafield definitions that match what we already handle as product
+  // options / variants (Size, Color). A merchant who created shopify
+  // metafields for these before using the builder otherwise ends up with
+  // two places to edit the same value.
+  const isVariantHandled = (def: MetafieldDefinition): boolean => {
+    const hay = `${def.namespace} ${def.key} ${def.name}`.toLowerCase();
+    return (
+      /\bsize\b|\bsizes\b/.test(hay) ||
+      /\bcolor\b|\bcolour\b|\bcolors\b|\bcolours\b/.test(hay)
+    );
+  };
+  const visibleMetafieldDefs = metafieldDefs.filter(
+    (def) => !isVariantHandled(def),
+  );
   const existingOptions = (loaderData?.existingOptions || {}) as ExistingOptionValues;
   const publications = (loaderData?.publications || []) as Publication[];
   const locations = (loaderData?.locations || []) as Location[];
@@ -252,6 +276,12 @@ export default function ProductBuilder() {
   const handleRefreshVendors = useCallback(() => {
     const fd = new FormData();
     fd.set("intent", "refresh-vendors");
+    refreshFetcher.submit(fd, { method: "post" });
+  }, [refreshFetcher]);
+
+  const handleRefreshMetafields = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "refresh-metafields");
     refreshFetcher.submit(fd, { method: "post" });
   }, [refreshFetcher]);
 
@@ -1121,15 +1151,25 @@ export default function ProductBuilder() {
         </Layout.Section>
 
         {/* Metafields */}
-        {metafieldDefs.length > 0 && (
+        {visibleMetafieldDefs.length > 0 && (
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                <Text as="h2" variant="headingMd">
-                  Metafields
-                </Text>
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="h2" variant="headingMd">
+                    Metafields
+                  </Text>
+                  <Button
+                    onClick={handleRefreshMetafields}
+                    loading={isRefreshingVendors}
+                    disabled={isRefreshingVendors}
+                    size="slim"
+                  >
+                    Refresh
+                  </Button>
+                </InlineStack>
                 <FormLayout>
-                  {metafieldDefs.map((def) => {
+                  {visibleMetafieldDefs.map((def) => {
                     const metaKey = `${def.namespace}.${def.key}`;
                     const mfType = def.type;
 
