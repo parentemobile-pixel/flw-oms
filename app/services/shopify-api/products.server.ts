@@ -550,10 +550,10 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
     title: input.title,
     vendor: input.vendor,
     ...(input.tags && input.tags.length > 0 ? { tags: input.tags } : {}),
-    // Always include variants so price + inventoryItem (tracked, cost) are
-    // set on create. When there are no product options, `variants` contains
-    // a single variant with empty optionValues — Shopify auto-creates a
-    // default option ("Title"/"Default Title") to match.
+    // Variants + productOptions only go in when there are actual options.
+    // For zero-option products Shopify rejects variants with empty
+    // optionValues, so we let Shopify auto-create a default variant and
+    // update its price / cost / tracking in a follow-up bulk update below.
     ...(activeOptions.length > 0
       ? {
           productOptions: activeOptions.map((opt) => ({
@@ -562,7 +562,7 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
           })),
           variants,
         }
-      : { variants }),
+      : {}),
     ...(input.metafields && input.metafields.length > 0
       ? {
           metafields: input.metafields.map((mf) => ({
@@ -604,13 +604,29 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
       };
     }>;
 
-    // 1. Auto-generate barcodes (default on)
-    if (input.generateBarcodes !== false && variantEdges.length > 0) {
+    // 1. Post-create bulk variant update.
+    //    - Always: auto-generate deterministic barcodes (unless disabled).
+    //    - Zero-option products only: also apply price / cost / tracked / sku
+    //      since we couldn't pass variants into productSet for that case.
+    //      (For sized products those are already set in productSet above.)
+    const noOptions = activeOptions.length === 0;
+    const shouldBulkUpdate =
+      variantEdges.length > 0 &&
+      (input.generateBarcodes !== false || noOptions);
+    if (shouldBulkUpdate) {
       try {
-        const variantsPayload = variantEdges.map((edge) => ({
-          id: edge.node.id,
-          barcode: generateBarcodeForVariant(edge.node.id),
-        }));
+        const variantsPayload = variantEdges.map((edge) => {
+          const payload: Record<string, unknown> = { id: edge.node.id };
+          if (input.generateBarcodes !== false) {
+            payload.barcode = generateBarcodeForVariant(edge.node.id);
+          }
+          if (noOptions) {
+            payload.price = parseFloat(input.price);
+            payload.inventoryItem = inventoryItemPayload;
+            if (input.skuPrefix) payload.sku = input.skuPrefix;
+          }
+          return payload;
+        });
         await admin.graphql(PRODUCT_VARIANTS_BULK_UPDATE_MUTATION, {
           variables: {
             productId: product.id,
@@ -618,7 +634,7 @@ export async function createProduct(admin: AdminApiContext, input: CreateProduct
           },
         });
       } catch (error) {
-        console.error("Failed to auto-generate barcodes:", error);
+        console.error("Post-create variant update failed:", error);
       }
     }
 
