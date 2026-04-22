@@ -298,8 +298,9 @@ export async function publishProductToChannels(
   admin: AdminApiContext,
   productId: string,
   publicationIds: string[],
-) {
-  const results = [];
+): Promise<{ published: string[]; failures: Array<{ pubId: string; reason: string }> }> {
+  const published: string[] = [];
+  const failures: Array<{ pubId: string; reason: string }> = [];
   for (const pubId of publicationIds) {
     try {
       const response = await admin.graphql(PUBLISHABLE_PUBLISH_MUTATION, {
@@ -309,12 +310,28 @@ export async function publishProductToChannels(
         },
       });
       const data = await response.json();
-      results.push(data.data.publishablePublish);
+      const errs = data?.data?.publishablePublish?.userErrors ?? [];
+      if (errs.length > 0) {
+        // Shopify's common failure here is "Access denied for publishablePublish"
+        // when write_publications is missing — surface that instead of eating
+        // it so the UI can prompt the user to reinstall / approve the scope.
+        failures.push({
+          pubId,
+          reason: errs
+            .map((e: { message: string }) => e.message)
+            .join("; "),
+        });
+      } else {
+        published.push(pubId);
+      }
     } catch (error) {
-      console.error(`Failed to publish to ${pubId}:`, error);
+      failures.push({
+        pubId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   }
-  return results;
+  return { published, failures };
 }
 
 // Fetch standard metafield definitions for products

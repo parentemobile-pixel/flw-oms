@@ -192,11 +192,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ? String(productId).replace("gid://shopify/Product/", "")
       : null;
 
-    // Publish to selected sales channels
+    // Publish to selected sales channels. Failures here are non-fatal
+    // (the product DID get created), but they're surfaced as a warning
+    // so the user knows to retry or check app scopes. The most common
+    // cause of "Access denied for publishablePublish" is a missing
+    // write_publications scope — which requires a reinstall to grant.
+    let publicationWarning: string | null = null;
     if (productId && selectedPublications.length > 0) {
       try {
-        await publishProductToChannels(admin, productId, selectedPublications);
+        const { failures } = await publishProductToChannels(
+          admin,
+          productId,
+          selectedPublications,
+        );
+        if (failures.length > 0) {
+          publicationWarning = `Product created, but couldn't publish to ${failures.length} channel(s): ${failures
+            .map((f) => f.reason)
+            .join("; ")}`;
+          console.error("Publication failures:", failures);
+        }
       } catch (error) {
+        publicationWarning = `Product created, but publication to channels errored: ${error}`;
         console.error("Failed to publish to channels:", error);
       }
     }
@@ -208,6 +224,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       productNumericId,
       title,
       intent,
+      publicationWarning,
     });
   } catch (error) {
     return json({ error: `Failed to create product: ${error}` });
@@ -882,6 +899,19 @@ export default function ProductBuilder() {
             <Banner tone="critical">{String(actionData.error)}</Banner>
           </Layout.Section>
         )}
+        {/* Publication failed — shown after a successful product create
+            when the publishablePublish mutation didn't land on one or
+            more channels. Most common cause is a missing
+            write_publications scope, which needs a reinstall to grant. */}
+        {actionData &&
+          "publicationWarning" in actionData &&
+          actionData.publicationWarning && (
+            <Layout.Section>
+              <Banner tone="warning" title="Sales channel publishing failed">
+                {String(actionData.publicationWarning)}
+              </Banner>
+            </Layout.Section>
+          )}
         {/* Save & View success banner is rendered at the BOTTOM of the page
             so the user sees it after the form they just submitted — see the
             bottom of the Layout for where it lands. */}
