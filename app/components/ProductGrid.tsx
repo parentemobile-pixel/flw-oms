@@ -1,4 +1,9 @@
-import { Fragment, useMemo, type CSSProperties } from "react";
+import {
+  Fragment,
+  useMemo,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { TextField, Text, InlineStack, Badge } from "@shopify/polaris";
 
 /**
@@ -95,6 +100,23 @@ interface ProductGridProps {
    * the cells (the original behavior).
    */
   sizeColumns?: string[];
+  /**
+   * Header label for the rightmost column. Defaults to "Row Total".
+   * Paired with `renderRowTrailing` when the caller wants that column
+   * to be something other than a numeric total.
+   */
+  trailingLabel?: string;
+  /**
+   * Replace the contents of the rightmost cell (the "Row Total" column)
+   * with custom content. Stock count uses this for a per-row Save button
+   * and counted/uncounted badge. When undefined, the default numeric row
+   * total renders.
+   */
+  renderRowTrailing?: (ctx: {
+    productId: string;
+    productTitle: string;
+    cells: GridCell[];
+  }) => ReactNode;
 }
 
 const SIZE_ORDER = [
@@ -154,6 +176,8 @@ export function ProductGrid({
   getCellStyle,
   groupBy,
   sizeColumns,
+  trailingLabel = "Row Total",
+  renderRowTrailing,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
@@ -268,7 +292,7 @@ export function ProductGrid({
               </th>
             ))}
             <th style={{ padding: "8px", textAlign: "right" }}>
-              Row Total
+              {trailingLabel}
             </th>
           </tr>
         </thead>
@@ -461,8 +485,16 @@ export function ProductGrid({
                     fontWeight: 600,
                   }}
                 >
-                  {rowTotalPrefix}
-                  {rowTotal.toFixed(rowTotalPrefix === "$" ? 2 : 0)}
+                  {renderRowTrailing
+                    ? renderRowTrailing({
+                        productId: row.productId,
+                        productTitle: row.productTitle,
+                        cells: [
+                          ...Object.values(row.bySize),
+                          ...row.overflowCells.map((o) => o.cell),
+                        ],
+                      })
+                    : `${rowTotalPrefix}${rowTotal.toFixed(rowTotalPrefix === "$" ? 2 : 0)}`}
                 </td>
               </tr>
               </Fragment>

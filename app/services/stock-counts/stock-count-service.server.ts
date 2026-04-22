@@ -207,6 +207,32 @@ export async function recordCount(
   });
 }
 
+/**
+ * Persist counted quantities for a batch of line items in one shot.
+ * Used by the per-row "Save" button on the count detail page so the
+ * whole row flips to "counted" atomically instead of trickling in
+ * cell-by-cell. Does NOT touch Shopify — that happens on complete.
+ */
+export async function saveRowCounts(
+  stockCountId: string,
+  entries: Array<{ lineItemId: string; countedQuantity: number }>,
+  countedBy: string | null = null,
+) {
+  if (entries.length === 0) return;
+  await db.$transaction(
+    entries.map((e) =>
+      db.stockCountLineItem.update({
+        where: { id: e.lineItemId },
+        data: {
+          countedQuantity: e.countedQuantity,
+          countedAt: new Date(),
+          countedBy,
+        },
+      }),
+    ),
+  );
+}
+
 export async function incrementCount(
   id: string,
   lineItemId: string,

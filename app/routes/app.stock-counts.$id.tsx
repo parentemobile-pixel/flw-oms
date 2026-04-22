@@ -35,6 +35,7 @@ import {
   getStockCount,
   incrementCount,
   recordCount,
+  saveRowCounts,
 } from "../services/stock-counts/stock-count-service.server";
 import { getLocations } from "../services/shopify-api/locations.server";
 import { BarcodeScanInput } from "../components/BarcodeScanInput";
@@ -69,6 +70,22 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         await recordCount(id, lineItemId, Number.isFinite(count) ? count : 0);
       }
       return json({ ok: true as const });
+    }
+    if (intent === "save-row") {
+      // Batch save a whole row's counted quantities. Payload is a JSON
+      // array of { lineItemId, countedQuantity } matching each cell in
+      // the row (including overflow sizes). Goes through in a single
+      // transaction so the row flips to "counted" atomically.
+      const raw = String(formData.get("entries") ?? "[]");
+      type Entry = { lineItemId: string; countedQuantity: number };
+      let entries: Entry[] = [];
+      try {
+        entries = JSON.parse(raw) as Entry[];
+      } catch {
+        return json({ error: "Bad save-row payload" }, { status: 400 });
+      }
+      await saveRowCounts(id, entries);
+      return json({ ok: true as const, savedRow: true as const });
     }
     if (intent === "scan") {
       const code = String(formData.get("code"));
@@ -123,14 +140,24 @@ export default function StockCountDetail() {
   const revalidator = useRevalidator();
   const isBusy = navigation.state === "submitting";
 
-  // Optimistic counts — UI updates immediately; background saves via fetcher.
-  // `null` = not counted yet (shows empty input + no green tick);
-  // `number` = counted (shows the value + green background).
-  const [counts, setCounts] = useState<Record<string, number | null>>(() => {
-    const init: Record<string, number | null> = {};
-    for (const li of sc.lineItems) init[li.id] = li.countedQuantity;
+  // Drafts vs saved — core of the "count row-by-row" UX.
+  //   drafts[id] = what's currently shown in the cell. Always a number;
+  //     seeded from countedQuantity ?? expectedQuantity so the user
+  //     starts with Shopify's current stock as the baseline.
+  //   saved[id]  = countedQuantity from the server. null = not saved
+  //     yet (row still "to be counted"); number = row was confirmed.
+  const [drafts, setDrafts] = useState<Record<string, number>>(() => {
+    const init: Record<string, number> = {};
+    for (const li of sc.lineItems) {
+      init[li.id] = li.countedQuantity ?? li.expectedQuantity;
+    }
     return init;
   });
+  const saved: Record<string, number | null> = useMemo(() => {
+    const m: Record<string, number | null> = {};
+    for (const li of sc.lineItems) m[li.id] = li.countedQuantity;
+    return m;
+  }, [sc.lineItems]);
 
   useEffect(() => {
     if (navigation.state === "idle" && actionData && "ok" in actionData) {
@@ -157,16 +184,18 @@ export default function StockCountDetail() {
     return { byVariantId: byV, byLineItemId: byL };
   }, [sc.lineItems]);
 
-  // After the server revalidates (e.g. scan incremented), sync counts
-  // with whatever the DB now holds. Without this, a second scan that
-  // races the first's revalidate would see stale client state.
+  // Pull server-saved counts into drafts whenever lineItems change
+  // (revalidation after a save or scan). Only overrides cells whose
+  // saved value differs from the current draft — lets the user keep
+  // editing in other cells without losing what they typed.
   useEffect(() => {
-    setCounts((prev) => {
+    setDrafts((prev) => {
       const next = { ...prev };
       let changed = false;
       for (const li of sc.lineItems) {
-        if (next[li.id] !== li.countedQuantity) {
-          next[li.id] = li.countedQuantity;
+        const serverVal = li.countedQuantity;
+        if (serverVal !== null && next[li.id] !== serverVal) {
+          next[li.id] = serverVal;
           changed = true;
         }
       }
@@ -174,29 +203,41 @@ export default function StockCountDetail() {
     });
   }, [sc.lineItems]);
 
-  const persistCount = useCallback(
-    (lineItemId: string, next: number | null) => {
-      const fd = new FormData();
-      fd.set("intent", "record");
-      fd.set("lineItemId", lineItemId);
-      // Empty string means "clear the count"; we distinguish null from 0
-      // because a user who counted zero is a signal ("nothing here") not
-      // the absence of a count.
-      fd.set("countedQuantity", next === null ? "" : String(next));
-      fetcher.submit(fd, { method: "post" });
-    },
-    [fetcher],
-  );
-
   const handleCellChange = useCallback(
     (variantId: string, raw: number) => {
       const li = byVariantId.get(variantId);
       if (!li) return;
       const safe = Math.max(0, Math.floor(raw));
-      setCounts((prev) => ({ ...prev, [li.id]: safe }));
-      persistCount(li.id, safe);
+      // Update draft only — nothing hits the DB until the user clicks
+      // "Save row" (or scans, which is treated as implicit confirm).
+      setDrafts((prev) => ({ ...prev, [li.id]: safe }));
     },
-    [byVariantId, persistCount],
+    [byVariantId],
+  );
+
+  // Row confirm: walk every cell in the row (including overflow sizes)
+  // and persist the current draft as countedQuantity. Done in one batch
+  // so the row flips "counted" atomically.
+  const saveRowFetcher = useFetcher<typeof action>();
+  const handleSaveRow = useCallback(
+    (rowCells: GridCell[]) => {
+      const entries = rowCells
+        .map((c) => {
+          const li = byVariantId.get(c.variantId);
+          if (!li) return null;
+          return {
+            lineItemId: li.id,
+            countedQuantity: drafts[li.id] ?? li.expectedQuantity,
+          };
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null);
+      if (entries.length === 0) return;
+      const fd = new FormData();
+      fd.set("intent", "save-row");
+      fd.set("entries", JSON.stringify(entries));
+      saveRowFetcher.submit(fd, { method: "post" });
+    },
+    [byVariantId, drafts, saveRowFetcher],
   );
 
   const handleScan = useCallback(
@@ -219,15 +260,16 @@ export default function StockCountDetail() {
     if (res.found) {
       const li = byLineItemId.get(res.lineItemId);
       if (li) {
-        const next = (counts[li.id] ?? 0) + 1;
-        setCounts((prev) => ({ ...prev, [li.id]: next }));
+        // Scan = implicit confirm for that single variant. The server
+        // already bumped countedQuantity via incrementCount; reflect the
+        // new value locally so the user sees the green tick before the
+        // revalidator catches up.
+        const serverNext = (li.countedQuantity ?? 0) + 1;
+        setDrafts((prev) => ({ ...prev, [li.id]: serverNext }));
         setScanFeedback({
-          message: `✓ ${li.productTitle} — ${li.variantTitle}: counted ${next}`,
+          message: `✓ ${li.productTitle} — ${li.variantTitle}: counted ${serverNext}`,
           tone: "success",
         });
-        // Auto-filter to the scanned product so the grid scrolls / narrows
-        // to show it — walking the floor with the scanner, you want
-        // confirmation the counted item actually showed up.
         setSearch(li.productTitle);
       }
     } else {
@@ -238,6 +280,18 @@ export default function StockCountDetail() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher.data]);
+
+  // saveRowFetcher finishes → trigger revalidation so `saved` reflects
+  // the new countedQuantity values (and the row flips to "Counted").
+  useEffect(() => {
+    if (
+      saveRowFetcher.state === "idle" &&
+      saveRowFetcher.data &&
+      "ok" in saveRowFetcher.data
+    ) {
+      revalidator.revalidate();
+    }
+  }, [saveRowFetcher.state, saveRowFetcher.data, revalidator]);
 
   const handleComplete = useCallback(() => {
     if (
@@ -304,24 +358,25 @@ export default function StockCountDetail() {
         variantTitle: li.variantTitle,
         selectedOptions,
         sku: li.sku,
-        stock: li.expectedQuantity,
-        value: counts[li.id] ?? null,
+        // Draft value — always a number. Cell is "empty"/pre-count if
+        // nothing has been saved yet; saved rows show their stored qty.
+        value: drafts[li.id] ?? li.expectedQuantity,
       };
     });
-  }, [sc.lineItems, counts, sort, search]);
+  }, [sc.lineItems, drafts, sort, search]);
 
   // Totals reflect the whole count (ignoring search filter) — the header
   // should show overall progress even while the grid is narrowed down.
-  const counted = sc.lineItems.filter(
-    (li) => counts[li.id] !== null && counts[li.id] !== undefined,
-  ).length;
+  // "Counted" = saved, confirmed rows (saved[id] !== null). Drafts that
+  // haven't been saved yet don't count toward progress.
+  const counted = sc.lineItems.filter((li) => saved[li.id] !== null).length;
   const remaining = sc.lineItems.length - counted;
   const totalExpected = sc.lineItems.reduce(
     (s, li) => s + li.expectedQuantity,
     0,
   );
   const totalCounted = sc.lineItems.reduce(
-    (s, li) => s + (counts[li.id] ?? 0),
+    (s, li) => s + (saved[li.id] ?? 0),
     0,
   );
 
@@ -353,13 +408,17 @@ export default function StockCountDetail() {
           vendorByProduct.get(row.productId) ?? "Unknown vendor"
       : undefined;
 
-  // Counted cells get a green tint — zero still counts as counted (null
-  // is "not counted yet"). Uses inset shadow so it's visible even inside
-  // the TextField's padding.
-  const getCellStyle = (cell: GridCell) =>
-    cell.value !== null
-      ? { background: "#e7f5ec", boxShadow: "inset 0 0 0 1px #8fd19e" }
-      : undefined;
+  // Cells are green once their row has been saved. Drafts (edits the
+  // user has typed but not confirmed yet) show neutral — nothing is
+  // "counted" until Save row.
+  const variantIdToLineItem = useMemo(() => byVariantId, [byVariantId]);
+  const getCellStyle = (cell: GridCell) => {
+    const li = variantIdToLineItem.get(cell.variantId);
+    if (li && saved[li.id] !== null) {
+      return { background: "#e7f5ec", boxShadow: "inset 0 0 0 1px #8fd19e" };
+    }
+    return undefined;
+  };
 
   return (
     <Page
@@ -505,7 +564,9 @@ export default function StockCountDetail() {
                 showColumns={{
                   cost: false,
                   retail: false,
-                  stock: true,
+                  // Stock column dropped — expected qty is now the default
+                  // value inside each cell, shown as the pre-count baseline.
+                  stock: false,
                   onOrder: false,
                 }}
                 // Keep the column set to the common apparel sizes — rarer
@@ -515,6 +576,58 @@ export default function StockCountDetail() {
                 getCellStyle={getCellStyle}
                 groupBy={groupBy}
                 readonly={!isActive}
+                trailingLabel="Status"
+                renderRowTrailing={({ cells: rowCells }) => {
+                  // Row state: all cells saved → Counted; none → Not
+                  // counted; mixed → Partial (rare, only if saved data
+                  // came from an older partial-save flow).
+                  const rowLineItems = rowCells
+                    .map((c) => byVariantId.get(c.variantId))
+                    .filter((li): li is NonNullable<typeof li> => !!li);
+                  const total = rowLineItems.length;
+                  const savedCount = rowLineItems.filter(
+                    (li) => saved[li.id] !== null,
+                  ).length;
+                  const allSaved = total > 0 && savedCount === total;
+                  // Row is "dirty" if any draft differs from its saved
+                  // value — user has edits they haven't confirmed yet.
+                  const dirty = rowLineItems.some(
+                    (li) =>
+                      saved[li.id] !== null &&
+                      drafts[li.id] !== saved[li.id],
+                  );
+                  // A global "any row saving" flag is fine here — users
+                  // save one row at a time, so per-row busy tracking isn't
+                  // worth the fragile formData comparison.
+                  const isRowBusy = saveRowFetcher.state !== "idle";
+                  return (
+                    <BlockStack gap="100" inlineAlign="end">
+                      {allSaved && !dirty ? (
+                        <Badge tone="success">Counted</Badge>
+                      ) : savedCount > 0 ? (
+                        <Badge tone="attention">
+                          {`${savedCount} of ${total} saved`}
+                        </Badge>
+                      ) : (
+                        <Badge>Not counted</Badge>
+                      )}
+                      {isActive && (
+                        <Button
+                          size="slim"
+                          onClick={() => handleSaveRow(rowCells)}
+                          loading={isRowBusy}
+                          variant={allSaved && !dirty ? undefined : "primary"}
+                        >
+                          {allSaved && !dirty
+                            ? "Re-save"
+                            : dirty
+                              ? "Save changes"
+                              : "Save row"}
+                        </Button>
+                      )}
+                    </BlockStack>
+                  );
+                }}
               />
             </div>
           </Card>
