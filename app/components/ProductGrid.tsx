@@ -285,7 +285,10 @@ export function ProductGrid({
                 style={{
                   padding: "8px",
                   textAlign: "center",
-                  minWidth: "64px",
+                  // Wide enough for 3-digit counts (e.g. "100") plus the
+                  // number input's up/down spinner buttons without the
+                  // digit getting clipped.
+                  minWidth: "88px",
                 }}
               >
                 {size}
@@ -381,7 +384,7 @@ export function ProductGrid({
                               </Text>
                               <div
                                 style={{
-                                  width: "64px",
+                                  width: "88px",
                                   ...(cellStyle ?? {}),
                                   borderRadius: "4px",
                                 }}

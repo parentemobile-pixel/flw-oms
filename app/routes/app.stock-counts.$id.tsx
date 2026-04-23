@@ -184,22 +184,24 @@ export default function StockCountDetail() {
     return { byVariantId: byV, byLineItemId: byL };
   }, [sc.lineItems]);
 
-  // Pull server-saved counts into drafts whenever lineItems change
-  // (revalidation after a save or scan). Only overrides cells whose
-  // saved value differs from the current draft — lets the user keep
-  // editing in other cells without losing what they typed.
+  // No blind-sync effect here on purpose — it used to overwrite user
+  // edits (type a new number after saving a row → revalidator fires →
+  // draft snapped back to saved value). The scan handler updates drafts
+  // optimistically, and Save row already uses the current draft as the
+  // value to persist, so drafts don't need to track the server after
+  // first load. Only new line items (added after initial mount, which
+  // we don't actually support) would need seeding.
   useEffect(() => {
     setDrafts((prev) => {
       const next = { ...prev };
-      let changed = false;
+      let added = false;
       for (const li of sc.lineItems) {
-        const serverVal = li.countedQuantity;
-        if (serverVal !== null && next[li.id] !== serverVal) {
-          next[li.id] = serverVal;
-          changed = true;
+        if (!(li.id in next)) {
+          next[li.id] = li.countedQuantity ?? li.expectedQuantity;
+          added = true;
         }
       }
-      return changed ? next : prev;
+      return added ? next : prev;
     });
   }, [sc.lineItems]);
 
