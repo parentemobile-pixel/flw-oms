@@ -1187,7 +1187,11 @@ function LineItemView({
                 style={{
                   padding: "2px 4px",
                   textAlign: "right",
-                  minWidth: "90px",
+                  // Wide enough that "$1234.56" + the number input's
+                  // up/down spinners fit without clipping the digits
+                  // (90px was the same too-narrow problem we hit on
+                  // the size cells).
+                  minWidth: "110px",
                 }}
               >
                 <MoneyField
@@ -1363,10 +1367,11 @@ function GridView({
               color: "#6b7280",
               textAlign: "center",
               marginTop: "2px",
+              lineHeight: 1.2,
             }}
             title={`${item.currentStock} in stock${item.onOrder > 0 ? `, ${item.onOrder} on order` : ""}`}
           >
-            {item.currentStock}
+            {item.currentStock} in stock
             {item.onOrder > 0 ? ` · +${item.onOrder}` : ""}
           </div>
         </div>
@@ -1456,7 +1461,7 @@ function GridView({
                       padding: "2px 4px",
                       textAlign: "right",
                       verticalAlign: "top",
-                      minWidth: "90px",
+                      minWidth: "110px",
                     }}
                   >
                     <MoneyField
