@@ -25,6 +25,7 @@ import {
   Icon,
   Banner,
   Spinner,
+  Checkbox,
 } from "@shopify/polaris";
 import { SearchIcon, DeleteIcon } from "@shopify/polaris-icons";
 
@@ -34,6 +35,7 @@ import {
   updatePurchaseOrder,
   updatePurchaseOrderStatus,
   deletePurchaseOrder,
+  setPurchaseOrderPaid,
 } from "../services/purchase-orders/po-service.server";
 import {
   getLocations,
@@ -116,6 +118,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       const lineItems = lineItemsRaw ? JSON.parse(lineItemsRaw) : undefined;
 
       await updatePurchaseOrder(session.shop, params.id!, {
+        name: ((formData.get("name") as string) ?? "").trim() || null,
         vendor: (formData.get("vendor") as string) || null,
         poNumberExt: (formData.get("poNumberExt") as string) || null,
         notes: (formData.get("notes") as string) || null,
@@ -135,6 +138,12 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     } catch (error) {
       return json({ error: String(error) });
     }
+  }
+
+  if (intent === "togglePaid") {
+    const paid = formData.get("paid") === "1";
+    await setPurchaseOrderPaid(session.shop, params.id!, paid);
+    return json({ ok: true as const });
   }
 
   return json({});
@@ -236,6 +245,7 @@ export default function PurchaseOrderDetail() {
   // Editable state (only used in edit mode; otherwise ignored)
   const [vendor, setVendor] = useState(po.vendor ?? "");
   const [vendorInput, setVendorInput] = useState(po.vendor ?? "");
+  const [name, setName] = useState(po.name ?? "");
   const [poNumberExt, setPoNumberExt] = useState(po.poNumberExt ?? "");
   const [shippingDate, setShippingDate] = useState(
     dateInputValue(po.shippingDate),
@@ -345,6 +355,7 @@ export default function PurchaseOrderDetail() {
   useEffect(() => {
     setVendor(po.vendor ?? "");
     setVendorInput(po.vendor ?? "");
+    setName(po.name ?? "");
     setPoNumberExt(po.poNumberExt ?? "");
     setShippingDate(dateInputValue(po.shippingDate));
     setExpectedDate(dateInputValue(po.expectedDate));
@@ -402,6 +413,7 @@ export default function PurchaseOrderDetail() {
     const fd = new FormData();
     fd.set("intent", "update");
     fd.set("vendor", vendor || vendorInput);
+    fd.set("name", name);
     fd.set("poNumberExt", poNumberExt);
     fd.set("shippingDate", shippingDate);
     fd.set("expectedDate", expectedDate);
@@ -431,6 +443,7 @@ export default function PurchaseOrderDetail() {
   }, [
     vendor,
     vendorInput,
+    name,
     poNumberExt,
     shippingDate,
     expectedDate,
@@ -440,6 +453,14 @@ export default function PurchaseOrderDetail() {
     canEditLines,
     submit,
   ]);
+
+  const paidFetcher = useFetcher<typeof action>();
+  const handleTogglePaid = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "togglePaid");
+    fd.set("paid", po.paidAt ? "0" : "1");
+    paidFetcher.submit(fd, { method: "post" });
+  }, [paidFetcher, po.paidAt]);
 
   // ── PDF / label downloads ────────────────────────────────────────────
   // All PDF downloads fetch inside the authenticated iframe and trigger a
@@ -676,12 +697,18 @@ export default function PurchaseOrderDetail() {
 
   return (
     <Page
-      title={po.poNumber}
+      // Prefer the user-friendly PO name in the page title; fall back to
+      // the auto-generated PO number when no name was set.
+      title={po.name || po.poNumber}
+      subtitle={po.name ? po.poNumber : undefined}
       backAction={{ url: "/app/purchase-orders" }}
       titleMetadata={
-        <Badge tone={PO_STATUS_TONES[po.status] || "info"}>
-          {PO_STATUS_LABELS[po.status] || po.status}
-        </Badge>
+        <InlineStack gap="200" blockAlign="center">
+          <Badge tone={PO_STATUS_TONES[po.status] || "info"}>
+            {PO_STATUS_LABELS[po.status] || po.status}
+          </Badge>
+          {po.paidAt && <Badge tone="success">Paid</Badge>}
+        </InlineStack>
       }
       primaryAction={primaryAction}
       secondaryActions={
@@ -774,6 +801,14 @@ export default function PurchaseOrderDetail() {
                     Line items are locked on {PO_STATUS_LABELS[po.status]?.toLowerCase() ?? po.status} POs — you can edit dates, notes, vendor PO #, vendor name, and receive location.
                   </Banner>
                 )}
+                <TextField
+                  label="PO name"
+                  value={name}
+                  onChange={setName}
+                  autoComplete="off"
+                  placeholder="e.g. FW25 reorder, Spring Hellys, Holiday tees"
+                  helpText="Shown as the primary title in the list view."
+                />
                 <InlineStack gap="400" wrap>
                   <div style={{ flex: 1, minWidth: "240px" }}>
                     <Autocomplete
@@ -936,6 +971,21 @@ export default function PurchaseOrderDetail() {
                     <Text as="p" variant="headingMd">
                       {totalReceived} / {totalOrdered}
                     </Text>
+                  </BlockStack>
+                  <BlockStack gap="100">
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Payment
+                    </Text>
+                    <Checkbox
+                      label={
+                        po.paidAt
+                          ? `Paid (${formatDate(po.paidAt)})`
+                          : "Mark as paid"
+                      }
+                      checked={!!po.paidAt}
+                      onChange={handleTogglePaid}
+                      disabled={paidFetcher.state !== "idle"}
+                    />
                   </BlockStack>
                 </InlineStack>
                 {po.notes && (

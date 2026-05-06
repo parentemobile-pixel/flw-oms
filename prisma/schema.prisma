@@ -116,6 +116,7 @@ model PurchaseOrder {
   shop              String
   poNumber          String
   poNumberExt       String? // vendor's own PO #
+  name              String? // human-friendly label, primary display in lists
   vendor            String?
   status            String    @default("draft") // draft | ordered | partially_received | received | cancelled
   notes             String?
@@ -126,6 +127,7 @@ model PurchaseOrder {
   shopifyLocationId String? // where received inventory lands
   receiveToken      String    @default(cuid()) // used for scan-to-receive signed URL
   pdfGeneratedAt    DateTime?
+  paidAt            DateTime? // null = unpaid; timestamp = when user marked it paid
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

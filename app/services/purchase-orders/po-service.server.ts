@@ -1,5 +1,4 @@
 import db from "../../db.server";
-import { format } from "date-fns";
 
 // ============================================
 // TYPES
@@ -18,6 +17,7 @@ export interface POLineItemInput {
 }
 
 export interface CreatePOInput {
+  name?: string | null;
   vendor?: string;
   notes?: string;
   shippingDate?: Date | null;
@@ -28,6 +28,7 @@ export interface CreatePOInput {
 }
 
 export interface UpdatePOInput {
+  name?: string | null;
   vendor?: string | null;
   notes?: string | null;
   shippingDate?: Date | null;
@@ -40,6 +41,7 @@ export interface UpdatePOInput {
 export interface POSummary {
   id: string;
   poNumber: string;
+  name: string | null;
   vendor: string | null;
   status: string;
   totalCost: number;
@@ -48,6 +50,7 @@ export interface POSummary {
   orderDate: Date | null;
   createdAt: Date;
   shopifyLocationId: string | null;
+  paidAt: Date | null;
   // Aggregates (computed, not stored)
   totalUnits: number;
   totalReceived: number;
@@ -57,27 +60,56 @@ export interface POSummary {
 // FUNCTIONS
 // ============================================
 
-export async function generatePoNumber(shop: string): Promise<string> {
-  const today = format(new Date(), "yyyyMMdd");
-  const prefix = `PO-${today}-`;
-  // Count-based sequencing collides whenever any same-day PO is deleted
-  // (count drops, the next create reuses an existing sequence). Pull the
-  // actual existing numbers and take max+1 instead.
-  const sameDay = await db.purchaseOrder.findMany({
+/**
+ * Build a vendor-prefix for a PO number. Takes the first three
+ * alphanumeric characters of the vendor name, uppercased, and pads
+ * short results with X. Empty / missing vendor → "PO".
+ *
+ * Examples:
+ *   "Comfort Colors"   -> "COM"
+ *   "F.L. Woods"       -> "FLW"
+ *   "3sixteen"         -> "3SI"
+ *   "AB"               -> "ABX"
+ *   ""                 -> "PO"
+ */
+export function poPrefixForVendor(vendor: string | null | undefined): string {
+  if (!vendor) return "PO";
+  const cleaned = vendor.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  if (cleaned.length === 0) return "PO";
+  return cleaned.slice(0, 3).padEnd(3, "X");
+}
+
+/**
+ * PO numbers look like `{PREFIX}-{SEQ}` where prefix comes from the
+ * vendor (or "PO" if no vendor) and seq is the next free integer for
+ * that prefix, starting at 1001.
+ *
+ * Different vendors that share a prefix (e.g. two 3-letter brand names
+ * starting with the same letters) share a sequence — that's fine, the
+ * resulting PO number is still globally unique. We just look at every
+ * existing PO with the same prefix and take max(seq) + 1.
+ */
+export async function generatePoNumber(
+  shop: string,
+  vendor?: string | null,
+): Promise<string> {
+  const prefix = `${poPrefixForVendor(vendor)}-`;
+  const existing = await db.purchaseOrder.findMany({
     where: { shop, poNumber: { startsWith: prefix } },
     select: { poNumber: true },
   });
-  let maxSeq = 0;
-  for (const { poNumber } of sameDay) {
+  let maxSeq = 1000; // first PO for any prefix is 1001
+  for (const { poNumber } of existing) {
     const tail = poNumber.slice(prefix.length);
     const n = parseInt(tail, 10);
     if (Number.isFinite(n) && n > maxSeq) maxSeq = n;
   }
-  return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+  return `${prefix}${maxSeq + 1}`;
 }
 
 export async function createPurchaseOrder(shop: string, data: CreatePOInput) {
-  const poNumber = await generatePoNumber(shop);
+  // Pass the vendor through so the PO number prefix matches it.
+  const poNumber = await generatePoNumber(shop, data.vendor);
   const totalCost = data.lineItems.reduce(
     (sum, li) => sum + li.unitCost * li.quantityOrdered,
     0,
@@ -87,6 +119,7 @@ export async function createPurchaseOrder(shop: string, data: CreatePOInput) {
     data: {
       shop,
       poNumber,
+      name: data.name ?? null,
       vendor: data.vendor ?? null,
       notes: data.notes ?? null,
       shippingDate: data.shippingDate ?? null,
@@ -126,6 +159,7 @@ export async function getPurchaseOrderSummaries(
     select: {
       id: true,
       poNumber: true,
+      name: true,
       vendor: true,
       status: true,
       totalCost: true,
@@ -134,6 +168,7 @@ export async function getPurchaseOrderSummaries(
       orderDate: true,
       createdAt: true,
       shopifyLocationId: true,
+      paidAt: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -230,6 +265,7 @@ export async function updatePurchaseOrder(
   return db.purchaseOrder.update({
     where: { id },
     data: {
+      name: data.name === undefined ? undefined : data.name,
       vendor: data.vendor === undefined ? undefined : data.vendor,
       notes: data.notes === undefined ? undefined : data.notes,
       shippingDate:
@@ -276,6 +312,28 @@ export async function updatePurchaseOrderStatus(
       status,
       ...(status === "ordered" ? { orderDate: new Date() } : {}),
     },
+  });
+}
+
+/**
+ * Toggle the paid flag on a PO. Stores a timestamp (so we know when it
+ * was marked paid) rather than a boolean — `paidAt !== null` is the
+ * "is paid" predicate everywhere in the UI.
+ */
+export async function setPurchaseOrderPaid(
+  shop: string,
+  id: string,
+  paid: boolean,
+) {
+  // shop guard so a stale id from another store can't be flipped.
+  const existing = await db.purchaseOrder.findFirst({
+    where: { shop, id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("PO not found");
+  return db.purchaseOrder.update({
+    where: { id },
+    data: { paidAt: paid ? new Date() : null },
   });
 }
 

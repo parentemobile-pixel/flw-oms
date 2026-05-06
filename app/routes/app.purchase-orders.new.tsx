@@ -131,6 +131,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "create") {
     const vendor = formData.get("vendor") as string;
+    const name = (formData.get("name") as string)?.trim() || null;
     const notes = formData.get("notes") as string;
     const shippingDateStr = formData.get("shippingDate") as string;
     const expectedDateStr = formData.get("expectedDate") as string;
@@ -148,6 +149,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     try {
       const po = await createPurchaseOrder(session.shop, {
+        name,
         vendor: vendor || undefined,
         notes: notes || undefined,
         shippingDate: shippingDateStr ? new Date(shippingDateStr) : null,
@@ -189,6 +191,7 @@ export default function NewPurchaseOrder() {
 
   const [vendor, setVendor] = useState("");
   const [vendorInput, setVendorInput] = useState("");
+  const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [shippingDate, setShippingDate] = useState("");
   const [expectedDate, setExpectedDate] = useState("");
@@ -416,6 +419,7 @@ export default function NewPurchaseOrder() {
     const formData = new FormData();
     formData.set("intent", "create");
     formData.set("vendor", vendor);
+    formData.set("name", name);
     formData.set("notes", notes);
     formData.set("shippingDate", shippingDate);
     formData.set("expectedDate", expectedDate);
@@ -425,6 +429,7 @@ export default function NewPurchaseOrder() {
     submit(formData, { method: "post" });
   }, [
     vendor,
+    name,
     notes,
     shippingDate,
     expectedDate,
@@ -562,6 +567,14 @@ export default function NewPurchaseOrder() {
           <Card>
             <BlockStack gap="400">
               <Text as="h2" variant="headingMd">PO Details</Text>
+              <TextField
+                label="PO name"
+                value={name}
+                onChange={setName}
+                autoComplete="off"
+                placeholder="e.g. FW25 reorder, Spring Hellys, Holiday tees"
+                helpText="A short label to recognize this PO at a glance — shown as the primary title in the list view."
+              />
               <InlineStack gap="400" wrap={false}>
                 <div style={{ flex: 1 }}>
                   <Autocomplete
