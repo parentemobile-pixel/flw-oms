@@ -97,11 +97,35 @@ export class PDFImportError extends Error {
   }
 }
 
+// MIME types Claude accepts as image inputs. Anything outside this list is
+// either unsupported or routed through the document branch (PDFs).
+const SUPPORTED_IMAGE_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const;
+type SupportedImageMediaType = (typeof SUPPORTED_IMAGE_TYPES)[number];
+
+export type POImportInput =
+  | { kind: "pdf"; buffer: Buffer }
+  | { kind: "image"; buffer: Buffer; mediaType: SupportedImageMediaType };
+
+export function isSupportedImageType(mime: string): mime is SupportedImageMediaType {
+  return SUPPORTED_IMAGE_TYPES.includes(mime as SupportedImageMediaType);
+}
+
 /**
- * Send a PDF to Claude and extract structured PO line items.
+ * Send a PDF or image to Claude and extract structured PO line items.
+ * Images are useful when the source is a phone photo of a vendor's
+ * paper PO, a screenshot of an order confirmation email, or any other
+ * raster that wasn't saved as a PDF.
+ *
  * Throws PDFImportError with a code on failure.
  */
-export async function extractPOFromPDF(pdfBuffer: Buffer): Promise<ExtractedPO> {
+export async function extractPOFromDocument(
+  input: POImportInput,
+): Promise<ExtractedPO> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new PDFImportError(
       "api_error",
@@ -109,17 +133,39 @@ export async function extractPOFromPDF(pdfBuffer: Buffer): Promise<ExtractedPO> 
     );
   }
 
-  // Anthropic's PDF support has a soft limit around 32MB / 100 pages.
-  // We reject anything over 20MB early to fail fast with a clearer message.
+  // Anthropic's PDF / image limits are similar; cap at 20MB for both so a
+  // huge upload fails fast with a clear message instead of a vague 4xx.
   const MAX_BYTES = 20 * 1024 * 1024;
-  if (pdfBuffer.byteLength > MAX_BYTES) {
+  if (input.buffer.byteLength > MAX_BYTES) {
     throw new PDFImportError(
       "too_large",
-      `PDF is ${(pdfBuffer.byteLength / 1024 / 1024).toFixed(1)}MB — too large. Split into smaller files (max 20MB).`,
+      `File is ${(input.buffer.byteLength / 1024 / 1024).toFixed(1)}MB — too large. Trim to under 20MB.`,
     );
   }
 
-  const base64 = pdfBuffer.toString("base64");
+  const base64 = input.buffer.toString("base64");
+
+  // Build the content block. PDFs go through the document content type
+  // (Claude rasterizes pages internally); images go through the image
+  // content type.
+  const docOrImageBlock =
+    input.kind === "pdf"
+      ? {
+          type: "document" as const,
+          source: {
+            type: "base64" as const,
+            media_type: "application/pdf" as const,
+            data: base64,
+          },
+        }
+      : {
+          type: "image" as const,
+          source: {
+            type: "base64" as const,
+            media_type: input.mediaType,
+            data: base64,
+          },
+        };
 
   let response: Anthropic.Message;
   try {
@@ -131,14 +177,7 @@ export async function extractPOFromPDF(pdfBuffer: Buffer): Promise<ExtractedPO> 
         {
           role: "user",
           content: [
-            {
-              type: "document",
-              source: {
-                type: "base64",
-                media_type: "application/pdf",
-                data: base64,
-              },
-            },
+            docOrImageBlock,
             {
               type: "text",
               text: "Extract the vendor PO line items from this document. Return only the JSON object described in the system prompt.",
@@ -195,6 +234,17 @@ export async function extractPOFromPDF(pdfBuffer: Buffer): Promise<ExtractedPO> 
   }
 
   return normalizeExtracted(parsed);
+}
+
+/**
+ * Back-compat shim for older callers that pass a PDF buffer directly.
+ * New code should call `extractPOFromDocument` and pass `kind: "pdf"`
+ * or `kind: "image"` explicitly.
+ */
+export async function extractPOFromPDF(
+  pdfBuffer: Buffer,
+): Promise<ExtractedPO> {
+  return extractPOFromDocument({ kind: "pdf", buffer: pdfBuffer });
 }
 
 function normalizeExtracted(raw: unknown): ExtractedPO {

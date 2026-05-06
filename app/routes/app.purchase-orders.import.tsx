@@ -30,7 +30,8 @@ import {
 
 import { authenticate } from "../shopify.server";
 import {
-  extractPOFromPDF,
+  extractPOFromDocument,
+  isSupportedImageType,
   matchExtractedLines,
   PDFImportError,
   type ImportedPO,
@@ -102,28 +103,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
 
+    // The form field is still named "pdf" for back-compat; the upload
+    // can be either a PDF or an image (jpeg/png/gif/webp). The type sniff
+    // below picks the right branch.
     const file = formData.get("pdf");
     if (!file || typeof file === "string" || !("arrayBuffer" in file)) {
       return json<ExtractResponse>({
         intent: "extract",
         ok: false,
-        error: "No PDF received. Please drop a PDF file.",
+        error: "No file received. Drop a PDF or an image of the PO.",
       });
     }
-    if (
-      (file as File).type &&
-      (file as File).type !== "application/pdf"
-    ) {
+    const mime = (file as File).type || "";
+    const isPdf = mime === "application/pdf";
+    const isImage = isSupportedImageType(mime);
+    if (mime && !isPdf && !isImage) {
       return json<ExtractResponse>({
         intent: "extract",
         ok: false,
-        error: `Expected a PDF, got ${(file as File).type || "unknown"}.`,
+        error: `Expected a PDF or image (JPG / PNG / WEBP / GIF), got ${mime}.`,
       });
     }
 
     const buf = Buffer.from(await (file as File).arrayBuffer());
     try {
-      const extracted = await extractPOFromPDF(buf);
+      // Default to "pdf" when the browser didn't send a content type
+      // (some clients omit it on drag-drop) — Anthropic will reject if
+      // the bytes don't actually parse, which is the correct error.
+      const extracted = await (isImage
+        ? extractPOFromDocument({ kind: "image", buffer: buf, mediaType: mime })
+        : extractPOFromDocument({ kind: "pdf", buffer: buf }));
       const matched = await matchExtractedLines(admin, extracted);
       return json<ExtractResponse>({
         intent: "extract",
@@ -228,7 +237,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       const po = await createPurchaseOrder(session.shop, {
         vendor: vendor || undefined,
-        notes: notes ? `Imported from PDF.\n\n${notes}` : "Imported from PDF.",
+        notes: notes
+          ? `Imported from vendor document.\n\n${notes}`
+          : "Imported from vendor document.",
         shopifyLocationId,
         poNumberExt: poNumberExt || null,
         lineItems: usable.map((l) => ({
@@ -329,12 +340,12 @@ export default function ImportPO() {
 
   const handleDrop = useCallback((_files: File[], acceptedFiles: File[]) => {
     setDropError(null);
-    const pdf = acceptedFiles[0];
-    if (!pdf) {
-      setDropError("That doesn't look like a PDF.");
+    const f = acceptedFiles[0];
+    if (!f) {
+      setDropError("That doesn't look like a PDF or image.");
       return;
     }
-    setFile(pdf);
+    setFile(f);
   }, []);
 
   const handleUpload = useCallback(() => {
@@ -401,9 +412,9 @@ export default function ImportPO() {
   // ── UI
   return (
     <Page
-      title="Import PO from PDF"
+      title="Import PO from PDF or image"
       backAction={{ url: "/app/purchase-orders" }}
-      subtitle="Drop a vendor PDF and Claude will extract line items"
+      subtitle="Drop a vendor PDF or a photo / screenshot — Claude extracts the line items"
     >
       <Layout>
         {!hasApiKey && (
@@ -419,13 +430,13 @@ export default function ImportPO() {
 
         {extractError && (
           <Layout.Section>
-            <Banner tone="critical" title="Couldn't read that PDF">
+            <Banner tone="critical" title="Couldn't read that file">
               <p>{extractError.error}</p>
               <InlineStack gap="200">
                 <Button url="/app/purchase-orders/new" variant="primary">
                   Start manually instead
                 </Button>
-                <Button onClick={handleReset}>Try another PDF</Button>
+                <Button onClick={handleReset}>Try another file</Button>
               </InlineStack>
             </Banner>
           </Layout.Section>
@@ -443,14 +454,14 @@ export default function ImportPO() {
             <Card>
               <BlockStack gap="400">
                 <Text as="h2" variant="headingMd">
-                  1. Upload vendor PDF
+                  1. Upload vendor PDF or image
                 </Text>
                 <DropZone
-                  accept="application/pdf"
+                  accept="application/pdf,image/jpeg,image/png,image/gif,image/webp"
                   type="file"
                   allowMultiple={false}
                   onDrop={handleDrop}
-                  errorOverlayText="Please drop a PDF"
+                  errorOverlayText="Please drop a PDF or image"
                 >
                   {file ? (
                     <div style={{ padding: "24px", textAlign: "center" }}>
@@ -458,13 +469,13 @@ export default function ImportPO() {
                         {file.name}
                       </Text>
                       <Text as="p" variant="bodySm" tone="subdued">
-                        {(file.size / 1024).toFixed(0)} KB — PDF ready
+                        {(file.size / 1024).toFixed(0)} KB — ready to extract
                       </Text>
                     </div>
                   ) : (
                     <DropZone.FileUpload
-                      actionTitle="Drop a PDF"
-                      actionHint="Vendor quote, order confirmation, or wholesale PO"
+                      actionTitle="Drop a PDF or image"
+                      actionHint="Vendor quote, order confirmation, wholesale PO, or a phone photo of a paper PO"
                     />
                   )}
                 </DropZone>

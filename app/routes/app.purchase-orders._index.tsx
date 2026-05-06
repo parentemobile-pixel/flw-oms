@@ -206,7 +206,7 @@ export default function PurchaseOrdersList() {
       }}
       secondaryActions={[
         {
-          content: "Import PDF",
+          content: "Import PDF / image",
           url: "/app/purchase-orders/import",
         },
       ]}
