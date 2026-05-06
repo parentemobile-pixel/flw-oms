@@ -44,6 +44,7 @@ import {
 } from "../services/shopify-api/locations.server";
 import { createPurchaseOrder } from "../services/purchase-orders/po-service.server";
 import { searchProductsByVendor } from "../services/shopify-api/products.server";
+import { MoneyField } from "../components/MoneyField";
 import { LocationPicker } from "../components/LocationPicker";
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
@@ -797,29 +798,17 @@ function LineRow({
       </td>
 
       <td style={{ padding: "4px 8px", textAlign: "right", minWidth: "90px" }}>
-        <TextField
-          label=""
-          labelHidden
-          type="number"
-          prefix="$"
-          value={String(line.unitCost)}
-          onChange={(v) => onChange({ unitCost: parseFloat(v) || 0 })}
-          min={0}
-          step={0.01}
-          autoComplete="off"
+        <MoneyField
+          label="Cost"
+          value={line.unitCost}
+          onChange={(next) => onChange({ unitCost: next })}
         />
       </td>
       <td style={{ padding: "4px 8px", textAlign: "right", minWidth: "90px" }}>
-        <TextField
-          label=""
-          labelHidden
-          type="number"
-          prefix="$"
-          value={String(line.retailPrice)}
-          onChange={(v) => onChange({ retailPrice: parseFloat(v) || 0 })}
-          min={0}
-          step={0.01}
-          autoComplete="off"
+        <MoneyField
+          label="Retail"
+          value={line.retailPrice}
+          onChange={(next) => onChange({ retailPrice: next })}
         />
       </td>
       <td style={{ padding: "4px 8px", textAlign: "right" }}>

@@ -59,14 +59,21 @@ export interface POSummary {
 
 export async function generatePoNumber(shop: string): Promise<string> {
   const today = format(new Date(), "yyyyMMdd");
-  const existing = await db.purchaseOrder.count({
-    where: {
-      shop,
-      poNumber: { startsWith: `PO-${today}` },
-    },
+  const prefix = `PO-${today}-`;
+  // Count-based sequencing collides whenever any same-day PO is deleted
+  // (count drops, the next create reuses an existing sequence). Pull the
+  // actual existing numbers and take max+1 instead.
+  const sameDay = await db.purchaseOrder.findMany({
+    where: { shop, poNumber: { startsWith: prefix } },
+    select: { poNumber: true },
   });
-  const seq = String(existing + 1).padStart(3, "0");
-  return `PO-${today}-${seq}`;
+  let maxSeq = 0;
+  for (const { poNumber } of sameDay) {
+    const tail = poNumber.slice(prefix.length);
+    const n = parseInt(tail, 10);
+    if (Number.isFinite(n) && n > maxSeq) maxSeq = n;
+  }
+  return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
 }
 
 export async function createPurchaseOrder(shop: string, data: CreatePOInput) {

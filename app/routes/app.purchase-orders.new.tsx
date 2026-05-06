@@ -50,6 +50,7 @@ import {
   type Location,
 } from "../services/shopify-api/locations.server";
 import { LocationPicker } from "../components/LocationPicker";
+import { MoneyField } from "../components/MoneyField";
 
 // Types for product/variant data from Shopify
 interface ShopifyVariant {
@@ -381,11 +382,11 @@ export default function NewPurchaseOrder() {
     );
   }, []);
 
-  const handleCostChange = useCallback((variantId: string, cost: string) => {
+  const handleCostChange = useCallback((variantId: string, cost: number) => {
     setSelectedItems((prev) =>
       prev.map((item) =>
         item.shopifyVariantId === variantId
-          ? { ...item, unitCost: parseFloat(cost) || 0 }
+          ? { ...item, unitCost: cost }
           : item,
       ),
     );
@@ -394,13 +395,12 @@ export default function NewPurchaseOrder() {
   // Update cost for many variants at once — used by the grid view where one
   // "row" represents a colorway and cost is typically shared across sizes.
   const handleRowCostChange = useCallback(
-    (variantIds: string[], cost: string) => {
-      const nextCost = parseFloat(cost) || 0;
+    (variantIds: string[], cost: number) => {
       const ids = new Set(variantIds);
       setSelectedItems((prev) =>
         prev.map((item) =>
           ids.has(item.shopifyVariantId)
-            ? { ...item, unitCost: nextCost }
+            ? { ...item, unitCost: cost }
             : item,
         ),
       );
@@ -1124,7 +1124,7 @@ function LineItemView({
 }: {
   items: SelectedVariant[];
   onQuantityChange: (id: string, qty: string) => void;
-  onCostChange: (id: string, cost: string) => void;
+  onCostChange: (id: string, cost: number) => void;
   onRemove: (id: string) => void;
 }) {
   return (
@@ -1160,18 +1160,12 @@ function LineItemView({
                   minWidth: "90px",
                 }}
               >
-                <TextField
+                <MoneyField
                   label="Cost"
-                  labelHidden
-                  type="number"
-                  prefix="$"
-                  value={String(item.unitCost)}
-                  onChange={(val) =>
-                    onCostChange(item.shopifyVariantId, val)
+                  value={item.unitCost}
+                  onChange={(next) =>
+                    onCostChange(item.shopifyVariantId, next)
                   }
-                  min={0}
-                  step={0.01}
-                  autoComplete="off"
                 />
               </td>
               <td style={{ padding: "8px", textAlign: "right" }}>
@@ -1244,7 +1238,7 @@ function GridView({
     sortedSizes: string[];
   };
   onQuantityChange: (id: string, qty: string) => void;
-  onRowCostChange: (variantIds: string[], cost: string) => void;
+  onRowCostChange: (variantIds: string[], cost: number) => void;
 }) {
   const { productGroups, sortedSizes } = gridData;
   const sizeColCount = Math.max(sortedSizes.length, 1);
@@ -1375,23 +1369,17 @@ function GridView({
                       minWidth: "90px",
                     }}
                   >
-                    <TextField
+                    <MoneyField
                       label="Cost"
-                      labelHidden
-                      type="number"
-                      prefix="$"
-                      value={String(row.cost)}
-                      onChange={(val) =>
+                      value={row.cost}
+                      onChange={(next) =>
                         onRowCostChange(
                           Object.values(row.bySize).map(
                             (v) => v.shopifyVariantId,
                           ),
-                          val,
+                          next,
                         )
                       }
-                      min={0}
-                      step={0.01}
-                      autoComplete="off"
                     />
                   </td>
                   <td style={{ padding: "8px", textAlign: "right", verticalAlign: "top" }}>

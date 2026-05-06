@@ -45,6 +45,7 @@ import {
   searchProductsByVendor,
 } from "../services/shopify-api/products.server";
 import { LocationPicker } from "../components/LocationPicker";
+import { MoneyField } from "../components/MoneyField";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
@@ -1190,51 +1191,31 @@ export default function PurchaseOrderDetail() {
                             {line.sku || "—"}
                           </td>
                           <td style={{ padding: "2px 4px" }}>
-                            <TextField
+                            <MoneyField
                               label="Cost"
-                              labelHidden
-                              type="number"
-                              prefix="$"
-                              value={String(line.unitCost)}
-                              onChange={(val) =>
+                              value={line.unitCost}
+                              onChange={(next) =>
                                 setEditLines((prev) =>
                                   prev.map((l, i) =>
-                                    i === idx
-                                      ? {
-                                          ...l,
-                                          unitCost: parseFloat(val) || 0,
-                                        }
-                                      : l,
+                                    i === idx ? { ...l, unitCost: next } : l,
                                   ),
                                 )
                               }
-                              min={0}
-                              step={0.01}
-                              autoComplete="off"
                             />
                           </td>
                           <td style={{ padding: "2px 4px" }}>
-                            <TextField
+                            <MoneyField
                               label="Retail"
-                              labelHidden
-                              type="number"
-                              prefix="$"
-                              value={String(line.retailPrice)}
-                              onChange={(val) =>
+                              value={line.retailPrice}
+                              onChange={(next) =>
                                 setEditLines((prev) =>
                                   prev.map((l, i) =>
                                     i === idx
-                                      ? {
-                                          ...l,
-                                          retailPrice: parseFloat(val) || 0,
-                                        }
+                                      ? { ...l, retailPrice: next }
                                       : l,
                                   ),
                                 )
                               }
-                              min={0}
-                              step={0.01}
-                              autoComplete="off"
                             />
                           </td>
                           <td style={{ padding: "2px 4px" }}>
@@ -1626,18 +1607,10 @@ function PODetailGrid({
                   }}
                 >
                   {editable && onRowCostChange ? (
-                    <TextField
+                    <MoneyField
                       label="Cost"
-                      labelHidden
-                      type="number"
-                      prefix="$"
-                      value={String(g.cost)}
-                      onChange={(val) =>
-                        onRowCostChange(g.lineItemIds, parseFloat(val) || 0)
-                      }
-                      min={0}
-                      step={0.01}
-                      autoComplete="off"
+                      value={g.cost}
+                      onChange={(next) => onRowCostChange(g.lineItemIds, next)}
                     />
                   ) : (
                     `$${g.cost.toFixed(2)}`
@@ -1651,21 +1624,12 @@ function PODetailGrid({
                   }}
                 >
                   {editable && onRowRetailChange ? (
-                    <TextField
+                    <MoneyField
                       label="Retail"
-                      labelHidden
-                      type="number"
-                      prefix="$"
-                      value={String(g.retail)}
-                      onChange={(val) =>
-                        onRowRetailChange(
-                          g.lineItemIds,
-                          parseFloat(val) || 0,
-                        )
+                      value={g.retail}
+                      onChange={(next) =>
+                        onRowRetailChange(g.lineItemIds, next)
                       }
-                      min={0}
-                      step={0.01}
-                      autoComplete="off"
                     />
                   ) : (
                     `$${g.retail.toFixed(2)}`
