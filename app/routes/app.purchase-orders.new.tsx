@@ -837,14 +837,14 @@ export default function NewPurchaseOrder() {
                       onClick={() => setViewMode("line")}
                       size="slim"
                     >
-                      Line Items
+                      Line View
                     </Button>
                     <Button
                       pressed={viewMode === "grid"}
                       onClick={() => setViewMode("grid")}
                       size="slim"
                     >
-                      Size Grid
+                      Grid View
                     </Button>
                   </ButtonGroup>
                 </InlineStack>
@@ -1234,6 +1234,50 @@ function LineItemView({
               </td>
             </tr>
           ))}
+          {/* Totals row — runs across the bottom under the matching
+              data columns so the merchandiser can see grand totals at
+              the same vertical alignment as the per-row numbers. */}
+          {items.length > 0 && (() => {
+            const totalQty = items.reduce(
+              (s, i) => s + i.quantityOrdered,
+              0,
+            );
+            const totalCost = items.reduce(
+              (s, i) => s + i.unitCost * i.quantityOrdered,
+              0,
+            );
+            const totalRetail = items.reduce(
+              (s, i) => s + i.retailPrice * i.quantityOrdered,
+              0,
+            );
+            return (
+              <tr
+                style={{
+                  borderTop: "2px solid #e1e3e5",
+                  background: "#fafafa",
+                  fontWeight: 600,
+                }}
+              >
+                <td style={{ padding: "8px" }} colSpan={3}>
+                  Totals ({items.length} line
+                  {items.length === 1 ? "" : "s"})
+                </td>
+                <td style={{ padding: "8px", textAlign: "right" }}>—</td>
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  ${totalRetail.toFixed(2)}
+                </td>
+                <td style={{ padding: "8px", textAlign: "right" }}>—</td>
+                <td style={{ padding: "8px", textAlign: "right" }}>—</td>
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  {totalQty}
+                </td>
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  ${totalCost.toFixed(2)}
+                </td>
+                <td />
+              </tr>
+            );
+          })()}
         </tbody>
       </table>
     </div>
@@ -1300,7 +1344,7 @@ function GridView({
         style={{
           padding: "2px 2px",
           verticalAlign: "top",
-          width: "60px",
+          width: "82px",
         }}
       >
         <div>
@@ -1363,8 +1407,12 @@ function GridView({
                     style={{
                       padding: "8px",
                       textAlign: "center",
-                      width: "60px",
-                      minWidth: "60px",
+                      // Wide enough that 3-digit qty + the native number
+                      // input's spinner arrows fit without clipping. 60px
+                      // was tight enough that the spinners visually
+                      // overlapped the digits.
+                      width: "82px",
+                      minWidth: "82px",
                     }}
                   >
                     {size}
@@ -1490,6 +1538,87 @@ function GridView({
               );
             }),
           )}
+          {/* Totals row — sums across every product group. Per-size
+              quantity totals live in their own size columns so the
+              merchandiser can read a column down + a totals row across. */}
+          {(() => {
+            const allItems: SelectedVariant[] = [];
+            for (const group of Object.values(productGroups)) {
+              for (const row of Object.values(group.rows)) {
+                allItems.push(...Object.values(row.bySize));
+              }
+            }
+            if (allItems.length === 0) return null;
+            const totalQty = allItems.reduce(
+              (s, i) => s + i.quantityOrdered,
+              0,
+            );
+            const totalCost = allItems.reduce(
+              (s, i) => s + i.unitCost * i.quantityOrdered,
+              0,
+            );
+            const totalRetail = allItems.reduce(
+              (s, i) => s + i.retailPrice * i.quantityOrdered,
+              0,
+            );
+            // Per-size column totals — same horizontal alignment as the
+            // size cells above so the eye reads straight down.
+            const qtyBySize: Record<string, number> = {};
+            for (const size of sortedSizes) qtyBySize[size] = 0;
+            let qtyNoSize = 0;
+            for (const group of Object.values(productGroups)) {
+              for (const row of Object.values(group.rows)) {
+                if (row.noSize) {
+                  // single-variant rows (no Size option) collapse onto
+                  // the colspan size area; sum into a no-size bucket.
+                  for (const v of Object.values(row.bySize)) {
+                    qtyNoSize += v.quantityOrdered;
+                  }
+                } else {
+                  for (const size of sortedSizes) {
+                    const v = row.bySize[size];
+                    if (v) qtyBySize[size] += v.quantityOrdered;
+                  }
+                }
+              }
+            }
+            return (
+              <tr
+                style={{
+                  borderTop: "2px solid #e1e3e5",
+                  background: "#fafafa",
+                  fontWeight: 600,
+                }}
+              >
+                <td style={{ padding: "8px" }}>
+                  Totals · {totalQty} units · $
+                  {totalRetail.toFixed(2)} retail
+                </td>
+                <td style={{ padding: "8px", textAlign: "right" }}>—</td>
+                <td style={{ padding: "8px", textAlign: "right" }}>—</td>
+                {sortedSizes.length > 0 ? (
+                  sortedSizes.map((size) => (
+                    <td
+                      key={size}
+                      style={{
+                        padding: "8px",
+                        textAlign: "center",
+                      }}
+                    >
+                      {qtyBySize[size] || "—"}
+                    </td>
+                  ))
+                ) : (
+                  <td style={{ padding: "8px", textAlign: "center" }}>
+                    {qtyNoSize}
+                  </td>
+                )}
+                <td style={{ padding: "8px", textAlign: "right" }}>
+                  ${totalCost.toFixed(2)}
+                </td>
+              </tr>
+            );
+          })()}
         </tbody>
       </table>
     </div>
