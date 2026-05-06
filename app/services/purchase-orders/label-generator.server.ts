@@ -18,18 +18,17 @@ interface LabelItem {
  * Layout (inches, 2w × 1h):
  *
  *   ┌──────────────────────────────────────┐
- *   │ M / Navy (9pt b)              $28.00 │  ← variant left, price right
+ *   │ Womens Bystander Sweater (7pt b)     │  ← product title, full width, bold
+ *   │ M / Navy (9pt n)               $28.00│  ← variant left (regular), price right (regular)
  *   │ ┃┃ ┃┃ ┃┃┃┃ ┃┃ ┃┃ ┃┃ ┃┃ ┃┃┃┃┃       │  ← barcode (centered)
  *   │ FLW12345ABC (6pt)                    │  ← sku readback under barcode
- *   │ Womens Bystander Sweater (7pt)       │  ← product title, full width
  *   └──────────────────────────────────────┘
  *
  * Key choices:
- *  - Product title moved to the BOTTOM so it has the full 2" width
- *    available — no more getting truncated by the price.
- *  - Variant (size/color) takes the prominent top-left spot since
- *    that's what a stocker checks first.
- *  - Price stays in the top-right, 16pt bold.
+ *  - Product title raised to the TOP and bold so it's the first thing
+ *    the eye lands on. Full label width minus margins.
+ *  - Variant (size/color) sits below it in regular weight; price right
+ *    of it in regular weight. Bold competition with the title is gone.
  *  - Barcode centered at 1.6"×0.3" with scale 5 for ~312 DPI print sharpness.
  */
 export async function generateLabelsPDF(
@@ -64,22 +63,31 @@ export async function generateLabelsPDF(
       }
       isFirstPage = false;
 
-      // ── Top-right: Price (13pt bold — reduced from 16pt) ──
-      let priceWidth = 0;
-      if (priceStr) {
-        doc.setFontSize(13);
-        doc.setFont("helvetica", "bold");
-        priceWidth = doc.getTextWidth(priceStr);
-        doc.text(priceStr, rightEdge, 0.18, { align: "right" });
-      }
-
-      // ── Top-left: Variant (9pt bold) — the thing a stocker looks at ──
       const hasVariant =
         item.variantTitle &&
         item.variantTitle.toLowerCase() !== "default title";
+
+      // ── Top: Product Title (8pt bold, centered, full width) ──
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      const fittedTitle = fitText(
+        doc,
+        item.productTitle,
+        labelWidth - 2 * margin,
+      );
+      doc.text(fittedTitle, labelWidth / 2, 0.13, { align: "center" });
+
+      // ── Second row: variant left, price right (both 9pt regular) ──
+      doc.setFont("helvetica", "normal");
+      let priceWidth = 0;
+      if (priceStr) {
+        doc.setFontSize(11);
+        priceWidth = doc.getTextWidth(priceStr);
+        doc.text(priceStr, rightEdge, 0.3, { align: "right" });
+      }
+
       if (hasVariant) {
         doc.setFontSize(9);
-        doc.setFont("helvetica", "bold");
         const variantMaxWidth =
           priceStr === ""
             ? labelWidth - 2 * margin
@@ -89,16 +97,14 @@ export async function generateLabelsPDF(
           item.variantTitle,
           variantMaxWidth,
         );
-        doc.text(fittedVariant, margin, 0.18);
+        doc.text(fittedVariant, margin, 0.3);
       }
 
       // ── Middle: Barcode (centered, high DPI) ──
       const barcodeW = 1.6;
       const barcodeH = 0.3;
       const barcodeX = (labelWidth - barcodeW) / 2;
-      // If there's no variant, pull the barcode up a touch since we have
-      // more vertical room.
-      const barcodeY = hasVariant ? 0.3 : 0.22;
+      const barcodeY = 0.4;
 
       if (barcodeText) {
         try {
@@ -137,16 +143,6 @@ export async function generateLabelsPDF(
         doc.setFont("helvetica", "normal");
         doc.text(barcodeText, labelWidth / 2, skuY, { align: "center" });
       }
-
-      // ── Bottom: Product Title (centered, full width minus margins) ──
-      doc.setFontSize(7);
-      doc.setFont("helvetica", "normal");
-      const fittedTitle = fitText(
-        doc,
-        item.productTitle,
-        labelWidth - 2 * margin,
-      );
-      doc.text(fittedTitle, labelWidth / 2, 0.95, { align: "center" });
     }
   }
 

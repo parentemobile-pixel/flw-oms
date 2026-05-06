@@ -658,49 +658,47 @@ export default function NewPurchaseOrder() {
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                {/* Header — click to collapse/expand */}
-                <div
-                  onClick={() => setProductsCollapsed((v) => !v)}
-                  style={{
-                    cursor: "pointer",
-                    userSelect: "none",
-                  }}
-                >
-                  <InlineStack align="space-between" blockAlign="center">
-                    <InlineStack gap="200" blockAlign="center">
-                      <Button
-                        icon={
-                          productsCollapsed
-                            ? ChevronDownIcon
-                            : ChevronUpIcon
-                        }
-                        variant="plain"
-                        accessibilityLabel={
-                          productsCollapsed
-                            ? "Expand product picker"
-                            : "Collapse product picker"
-                        }
-                        onClick={() =>
-                          setProductsCollapsed((v) => !v)
-                        }
-                      />
+                {/* Header — title clickable to toggle, plus an explicit
+                    Collapse/Expand button on the right. The carrot used
+                    to bubble its onClick into the wrapping div's onClick
+                    and the two would cancel each other out. Now the
+                    title text is the only sibling that toggles, and the
+                    right-side button uses stopPropagation. */}
+                <InlineStack align="space-between" blockAlign="center">
+                  <InlineStack gap="200" blockAlign="center">
+                    <button
+                      type="button"
+                      onClick={() => setProductsCollapsed((v) => !v)}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
                       <Text as="h2" variant="headingMd">
                         Select Products from {vendor}
                       </Text>
-                      {selectedItems.length > 0 && (
-                        <Badge tone="info">
-                          {`${selectedItems.length} selected`}
-                        </Badge>
-                      )}
-                      {isSearching && <Spinner size="small" />}
-                    </InlineStack>
-                    {productsCollapsed && selectedItems.length > 0 && (
-                      <Text as="span" variant="bodySm" tone="subdued">
-                        Click to show products
-                      </Text>
+                    </button>
+                    {selectedItems.length > 0 && (
+                      <Badge tone="info">
+                        {`${selectedItems.length} selected`}
+                      </Badge>
                     )}
+                    {isSearching && <Spinner size="small" />}
                   </InlineStack>
-                </div>
+                  <Button
+                    icon={
+                      productsCollapsed ? ChevronDownIcon : ChevronUpIcon
+                    }
+                    onClick={() => setProductsCollapsed((v) => !v)}
+                  >
+                    {productsCollapsed
+                      ? "Expand section"
+                      : "Collapse section"}
+                  </Button>
+                </InlineStack>
 
                 <Collapsible
                   id="po-product-picker"
@@ -777,14 +775,33 @@ export default function NewPurchaseOrder() {
                                   </Badge>
                                 )}
                               </InlineStack>
-                              <Text
-                                as="p"
-                                variant="bodySm"
-                                tone="subdued"
-                              >
-                                {product.variants.edges.length} variant
-                                {product.variants.edges.length !== 1 ? "s" : ""}
-                              </Text>
+                              <InlineStack gap="200" blockAlign="center">
+                                <Text
+                                  as="p"
+                                  variant="bodySm"
+                                  tone="subdued"
+                                >
+                                  {product.variants.edges.length} variant
+                                  {product.variants.edges.length !== 1 ? "s" : ""}
+                                </Text>
+                                {/* Open the product in Shopify admin in
+                                    a new tab. The shopify: scheme is the
+                                    embedded-app deep-link form; new-tab
+                                    via target=_blank doesn't trap inside
+                                    the iframe. */}
+                                <a
+                                  href={`shopify:admin/products/${String(product.id).replace("gid://shopify/Product/", "")}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    fontSize: "13px",
+                                    textDecoration: "none",
+                                  }}
+                                >
+                                  Open in admin ↗
+                                </a>
+                              </InlineStack>
                             </InlineStack>
 
                             <ProductVariantPicker
@@ -1281,8 +1298,9 @@ function GridView({
       <td
         key={size}
         style={{
-          padding: "2px 4px",
+          padding: "2px 2px",
           verticalAlign: "top",
+          width: "60px",
         }}
       >
         <div>
@@ -1304,7 +1322,7 @@ function GridView({
             }}
             title={`${item.currentStock} in stock${item.onOrder > 0 ? `, ${item.onOrder} on order` : ""}`}
           >
-            stock {item.currentStock}
+            {item.currentStock}
             {item.onOrder > 0 ? ` · +${item.onOrder}` : ""}
           </div>
         </div>
@@ -1323,7 +1341,17 @@ function GridView({
       >
         <thead>
           <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-            <th style={{ padding: "8px", textAlign: "left" }}>
+            {/* Product / Variant gets the lion's share. Sizes get a
+                tighter cell (still wide enough for 3-digit qty + the
+                spinner buttons but no longer ~140px each). */}
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "left",
+                minWidth: "260px",
+                width: "32%",
+              }}
+            >
               Product / Variant
             </th>
             <th style={{ padding: "8px", textAlign: "right" }}>Cost</th>
@@ -1335,7 +1363,8 @@ function GridView({
                     style={{
                       padding: "8px",
                       textAlign: "center",
-                      minWidth: "80px",
+                      width: "60px",
+                      minWidth: "60px",
                     }}
                   >
                     {size}

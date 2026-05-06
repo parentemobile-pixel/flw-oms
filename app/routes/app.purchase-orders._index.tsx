@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -21,6 +21,7 @@ import { authenticate } from "../shopify.server";
 import {
   getPurchaseOrderSummaries,
   setPurchaseOrderPaid,
+  type POSummary,
 } from "../services/purchase-orders/po-service.server";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
 
@@ -53,9 +54,71 @@ function formatDate(date: Date | string | null | undefined): string {
   return new Date(date).toLocaleDateString();
 }
 
+// Column-index → comparator. Mirror the headings array order — adding or
+// reordering columns here means updating the headings list below to match.
+const SORT_COMPARATORS: Array<(a: POSummary, b: POSummary) => number> = [
+  // 0: PO (name preferred, fall back to poNumber)
+  (a, b) => (a.name || a.poNumber).localeCompare(b.name || b.poNumber),
+  // 1: Vendor
+  (a, b) => (a.vendor || "").localeCompare(b.vendor || ""),
+  // 2: Status
+  (a, b) => a.status.localeCompare(b.status),
+  // 3: Paid (paid first when ascending)
+  (a, b) => Number(!!b.paidAt) - Number(!!a.paidAt),
+  // 4: Units
+  (a, b) => a.totalUnits - b.totalUnits,
+  // 5: Received (% so a 50/100 PO sorts above 5/5 — partial fulfillment urgency)
+  (a, b) => {
+    const pa = a.totalUnits > 0 ? a.totalReceived / a.totalUnits : 0;
+    const pb = b.totalUnits > 0 ? b.totalReceived / b.totalUnits : 0;
+    return pa - pb;
+  },
+  // 6: Total Cost
+  (a, b) => a.totalCost - b.totalCost,
+  // 7: Ship By (nulls last when ascending)
+  (a, b) => dateAsc(a.shippingDate, b.shippingDate),
+  // 8: Expected
+  (a, b) => dateAsc(a.expectedDate, b.expectedDate),
+  // 9: Created
+  (a, b) => dateAsc(a.createdAt, b.createdAt),
+];
+
+function dateAsc(
+  a: Date | string | null | undefined,
+  b: Date | string | null | undefined,
+): number {
+  // Null / missing dates sort after real dates in ascending order so an
+  // empty Ship By doesn't claim the top of the list.
+  const ta = a ? new Date(a).getTime() : Number.POSITIVE_INFINITY;
+  const tb = b ? new Date(b).getTime() : Number.POSITIVE_INFINITY;
+  return ta - tb;
+}
+
 export default function PurchaseOrdersList() {
   const { purchaseOrders } = useLoaderData<typeof loader>();
   const paidFetcher = useFetcher<typeof action>();
+  // Default sort: created date descending (matches the previous behavior
+  // when summaries came back orderBy createdAt desc).
+  const [sortIndex, setSortIndex] = useState<number>(9);
+  const [sortDir, setSortDir] = useState<"ascending" | "descending">(
+    "descending",
+  );
+
+  const sortedPOs = useMemo(() => {
+    const cmp = SORT_COMPARATORS[sortIndex];
+    if (!cmp) return purchaseOrders;
+    const out = [...purchaseOrders].sort(cmp);
+    if (sortDir === "descending") out.reverse();
+    return out;
+  }, [purchaseOrders, sortIndex, sortDir]);
+
+  const handleSort = useCallback(
+    (index: number, direction: "ascending" | "descending") => {
+      setSortIndex(index);
+      setSortDir(direction);
+    },
+    [],
+  );
 
   const handleTogglePaid = useCallback(
     (id: string, currentlyPaid: boolean) => {
@@ -83,7 +146,7 @@ export default function PurchaseOrdersList() {
     </EmptyState>
   );
 
-  const rowMarkup = purchaseOrders.map((po, index) => (
+  const rowMarkup = sortedPOs.map((po, index) => (
     <IndexTable.Row id={po.id} key={po.id} position={index}>
       <IndexTable.Cell>
         <Link
@@ -157,6 +220,23 @@ export default function PurchaseOrdersList() {
               <IndexTable
                 resourceName={resourceName}
                 itemCount={purchaseOrders.length}
+                // Sortable columns — every column index here has a matching
+                // comparator in SORT_COMPARATORS. Click a header to sort.
+                sortable={[
+                  true, // PO
+                  true, // Vendor
+                  true, // Status
+                  true, // Paid
+                  true, // Units
+                  true, // Received
+                  true, // Total Cost
+                  true, // Ship By
+                  true, // Expected
+                  true, // Created
+                ]}
+                sortColumnIndex={sortIndex}
+                sortDirection={sortDir}
+                onSort={handleSort}
                 headings={[
                   { title: "PO" },
                   { title: "Vendor" },
