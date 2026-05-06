@@ -30,3 +30,19 @@ export const PO_STATUS_TONES: Record<string, "info" | "success" | "warning" | "c
   received: "success",
   cancelled: "critical",
 };
+
+/**
+ * Company info used on PO PDFs (and any future printed docs). Edit the
+ * address / phone / email here when the second store opens or info
+ * changes — every PDF picks it up automatically.
+ */
+export const FLW_COMPANY_INFO = {
+  name: "F.L. Woods",
+  // Marblehead flagship store. Update if the actual street address differs.
+  addressLines: [
+    "120 Pleasant Street",
+    "Marblehead, MA 01945",
+  ],
+  phone: "(781) 631-1414",
+  email: "info@flwoods.com",
+} as const;

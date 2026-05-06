@@ -2,6 +2,8 @@ import bwipjs from "bwip-js";
 import { jsPDF } from "jspdf";
 import { format as formatDate } from "date-fns";
 
+import { FLW_COMPANY_INFO } from "../../utils/constants";
+
 interface POLineForPdf {
   productTitle: string;
   variantTitle: string;
@@ -12,8 +14,9 @@ interface POLineForPdf {
   quantityOrdered: number;
   quantityReceived: number;
   selectedOptions?: Array<{ name: string; value: string }>;
-  /** Pre-fetched product image as a data: URL. Null when the product has
-   *  no featuredImage or the image fetch failed. */
+  /** Pre-fetched VARIANT image as a data: URL. Null when the variant has
+   *  no image (or product has no featuredImage to fall back on) or the
+   *  image fetch failed. */
   imageDataUrl?: string | null;
   /** Value of the first product metafield whose key/namespace matches
    *  /cutting/i. Null when the product doesn't have one. */
@@ -23,6 +26,7 @@ interface POLineForPdf {
 interface POForPdf {
   poNumber: string;
   poNumberExt: string | null;
+  name: string | null;
   vendor: string | null;
   status: string;
   shippingDate: Date | string | null;
@@ -57,28 +61,54 @@ export async function generatePOPdf(options: {
 
   const pageWidth = view === "grid" ? 11 : 8.5;
   const margin = 0.5;
-  let y = margin;
 
-  // ── Header ─────────────────────────────────────────────────────────
-  doc.setFontSize(18);
+  // ── Header layout ─────────────────────────────────────────────────
+  // Two columns: left side has company branding + PO metadata; right
+  // side has the PO# and PO Name in big text plus the scan-to-receive
+  // QR code below them. We track the bottom of each column separately
+  // and start the body table below the lower of the two.
+
+  // ── Left column: company info → PO metadata ──
+  let leftY = margin;
+  doc.setFontSize(16);
   doc.setFont("helvetica", "bold");
-  doc.text("FL WOODS — Purchase Order", margin, y + 0.15);
-  y += 0.4;
+  doc.text(FLW_COMPANY_INFO.name, margin, leftY + 0.15);
+  leftY += 0.3;
+
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "normal");
+  for (const line of FLW_COMPANY_INFO.addressLines) {
+    doc.text(line, margin, leftY + 0.13);
+    leftY += 0.18;
+  }
+  if (FLW_COMPANY_INFO.phone) {
+    doc.text(FLW_COMPANY_INFO.phone, margin, leftY + 0.13);
+    leftY += 0.18;
+  }
+  if (FLW_COMPANY_INFO.email) {
+    doc.text(FLW_COMPANY_INFO.email, margin, leftY + 0.13);
+    leftY += 0.18;
+  }
+  leftY += 0.15; // gap before metadata block
 
   doc.setFontSize(10);
-  doc.setFont("helvetica", "normal");
-  doc.text(`PO #: ${po.poNumber}`, margin, y + 0.15);
-  if (po.poNumberExt) {
-    doc.text(`Vendor PO #: ${po.poNumberExt}`, margin + 2.5, y + 0.15);
-  }
-  y += 0.25;
-
   if (po.vendor) {
-    doc.text(`Vendor: ${po.vendor}`, margin, y + 0.15);
-    y += 0.25;
+    doc.setFont("helvetica", "bold");
+    doc.text(`Vendor: `, margin, leftY + 0.15);
+    doc.setFont("helvetica", "normal");
+    doc.text(po.vendor, margin + 0.55, leftY + 0.15);
+    leftY += 0.25;
+  }
+  if (po.poNumberExt) {
+    doc.setFont("helvetica", "bold");
+    doc.text(`Vendor PO #: `, margin, leftY + 0.15);
+    doc.setFont("helvetica", "normal");
+    doc.text(po.poNumberExt, margin + 0.95, leftY + 0.15);
+    leftY += 0.25;
   }
 
-  // Dates row
+  // Dates row — broken across multiple lines if too long for one
+  doc.setFont("helvetica", "normal");
   const dateItems: string[] = [];
   dateItems.push(`Created: ${formatDateSafe(po.createdAt)}`);
   if (po.orderDate) dateItems.push(`Ordered: ${formatDateSafe(po.orderDate)}`);
@@ -86,15 +116,45 @@ export async function generatePOPdf(options: {
     dateItems.push(`Ship by: ${formatDateSafe(po.shippingDate)}`);
   if (po.expectedDate)
     dateItems.push(`Expected: ${formatDateSafe(po.expectedDate)}`);
-  doc.text(dateItems.join("   ·   "), margin, y + 0.15);
-  y += 0.25;
+  doc.text(dateItems.join("   ·   "), margin, leftY + 0.15);
+  leftY += 0.25;
 
   if (locationName) {
-    doc.text(`Receive at: ${locationName}`, margin, y + 0.15);
-    y += 0.25;
+    doc.setFont("helvetica", "bold");
+    doc.text(`Receive at: `, margin, leftY + 0.15);
+    doc.setFont("helvetica", "normal");
+    doc.text(locationName, margin + 0.85, leftY + 0.15);
+    leftY += 0.25;
   }
 
-  // ── QR Code (scan-to-receive) ──────────────────────────────────────
+  // ── Right column: PO# (huge), PO Name (large), then QR ──
+  // Right-aligned to the page's right edge so the column sits flush.
+  const rightEdge = pageWidth - margin;
+  let rightY = margin;
+  // PO Number — the largest text on the page, scannable from across the room
+  doc.setFontSize(22);
+  doc.setFont("helvetica", "bold");
+  doc.text(po.poNumber, rightEdge, rightY + 0.25, { align: "right" });
+  rightY += 0.4;
+  // PO Name (when present) — slightly smaller but still large
+  if (po.name) {
+    doc.setFontSize(13);
+    doc.setFont("helvetica", "normal");
+    // Wrap the name if it's longer than the available right-column width
+    // so the QR doesn't get pushed off the page.
+    const nameLines = doc.splitTextToSize(
+      po.name,
+      Math.min(4.5, pageWidth / 2.5),
+    );
+    for (const line of nameLines) {
+      doc.text(line, rightEdge, rightY + 0.18, { align: "right" });
+      rightY += 0.22;
+    }
+  }
+  rightY += 0.1;
+
+  // QR code — sits on the right column under the PO# / Name
+  const qrSize = 1.1;
   try {
     const receiveUrl = `${appUrl.replace(/\/$/, "")}/r/${po.receiveToken}`;
     const qrPng = await bwipjs.toBuffer({
@@ -105,26 +165,26 @@ export async function generatePOPdf(options: {
     });
     const base64 = Buffer.from(qrPng).toString("base64");
     const qrData = `data:image/png;base64,${base64}`;
-    const qrSize = 1.1;
     doc.addImage(
       qrData,
       "PNG",
-      pageWidth - margin - qrSize,
-      margin,
+      rightEdge - qrSize,
+      rightY,
       qrSize,
       qrSize,
     );
     doc.setFontSize(7);
-    doc.text(
-      "Scan to receive",
-      pageWidth - margin - qrSize,
-      margin + qrSize + 0.15,
-    );
+    doc.text("Scan to receive", rightEdge - qrSize, rightY + qrSize + 0.15);
+    rightY += qrSize + 0.25;
   } catch {
     // Skip QR on failure — not worth failing the PDF for
   }
 
-  y += 0.25;
+  // ── Body starts below the taller of the two columns plus a gap ──
+  // Old version started 0.25" below the last left-column line, which
+  // jammed the underline rule into the first row's text. Bumped to
+  // 0.5" so the rule has visible breathing room.
+  let y = Math.max(leftY, rightY) + 0.5;
 
   // ── Body ───────────────────────────────────────────────────────────
   if (view === "line") {
@@ -182,7 +242,7 @@ function drawLineTable(
     { title: "Line Total", width: 0.85, align: "right" as const },
   ];
 
-  let y = yStart + 0.2;
+  let y = yStart;
   doc.setFontSize(9);
   doc.setFont("helvetica", "bold");
   let x = margin;
@@ -196,7 +256,10 @@ function drawLineTable(
   }
   doc.setLineWidth(0.01);
   doc.line(margin, y + 0.07, pageWidth - margin, y + 0.07);
-  y += 0.15;
+  // Generous gap after the rule so the first row's text doesn't crash
+  // into the underline. Was 0.15 → ~0.08" of clearance with 8pt text;
+  // bumped to 0.3 for a clear breathing space before the first row.
+  y += 0.3;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
@@ -357,7 +420,8 @@ function drawGridTable(
   const imgColW = 0.55;
   const productColWidth = 2.7;
   const priceColWidth = 0.8;
-  const totalColWidth = 0.8;
+  const unitsColWidth = 0.6;
+  const lineCostColWidth = 0.9;
   const sizeColWidth = Math.max(
     0.5,
     (pageWidth -
@@ -365,11 +429,12 @@ function drawGridTable(
       imgColW -
       productColWidth -
       priceColWidth -
-      totalColWidth) /
+      unitsColWidth -
+      lineCostColWidth) /
       Math.max(sizes.length, 1),
   );
 
-  let y = yStart + 0.2;
+  let y = yStart;
 
   // Header
   doc.setFontSize(8);
@@ -383,10 +448,13 @@ function drawGridTable(
     doc.text(size, x + sizeColWidth / 2, y, { align: "center" });
     x += sizeColWidth;
   }
-  doc.text("Total", x + totalColWidth - 0.05, y, { align: "right" });
+  doc.text("Units", x + unitsColWidth - 0.05, y, { align: "right" });
+  x += unitsColWidth;
+  doc.text("Line $", x + lineCostColWidth - 0.05, y, { align: "right" });
   doc.setLineWidth(0.01);
   doc.line(margin, y + 0.07, pageWidth - margin, y + 0.07);
-  y += 0.15;
+  // Same generous gap as the line table so rows aren't kissing the rule.
+  y += 0.3;
 
   // Rows
   doc.setFont("helvetica", "normal");
@@ -444,7 +512,7 @@ function drawGridTable(
     x += priceColWidth;
 
     // ── Size cells ──
-    let rowTotal = 0;
+    let rowUnits = 0;
     for (const size of sizes) {
       const cell = row.bySize[size];
       if (cell) {
@@ -453,16 +521,21 @@ function drawGridTable(
             ? `${cell.ordered} (${cell.received})`
             : `${cell.ordered}`;
         doc.text(label, x + sizeColWidth / 2, y, { align: "center" });
-        rowTotal += cell.ordered;
+        rowUnits += cell.ordered;
       } else {
         doc.text("—", x + sizeColWidth / 2, y, { align: "center" });
       }
       x += sizeColWidth;
     }
 
-    // ── Row total ──
+    // ── Units total + Line cost ──
     doc.setFont("helvetica", "bold");
-    doc.text(String(rowTotal), x + totalColWidth - 0.05, y, {
+    doc.text(String(rowUnits), x + unitsColWidth - 0.05, y, {
+      align: "right",
+    });
+    x += unitsColWidth;
+    const rowLineCost = rowUnits * row.cost;
+    doc.text(`$${rowLineCost.toFixed(2)}`, x + lineCostColWidth - 0.05, y, {
       align: "right",
     });
     doc.setFont("helvetica", "normal");

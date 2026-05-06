@@ -25,34 +25,49 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const locationName =
     locations.find((l) => l.id === po.shopifyLocationId)?.name ?? null;
 
-  // For grid view, try to fetch selectedOptions per variant (not stored in DB).
-  // Fall back to parsing from variantTitle ("M / Red") if Shopify fetch fails.
-  let variantOptions: Record<
+  // Fetch per-variant info: selectedOptions (used by grid view) + the
+  // variant's own image (preferred over the product's featuredImage so a
+  // multi-color row shows the actual color the line is for). One batched
+  // call across every distinct variant on the PO.
+  const variantInfo: Record<
     string,
-    Array<{ name: string; value: string }>
+    {
+      selectedOptions: Array<{ name: string; value: string }>;
+      imageUrl: string | null;
+    }
   > = {};
-  if (view === "grid" && po.lineItems.length > 0) {
+  if (po.lineItems.length > 0) {
     try {
       const ids = [...new Set(po.lineItems.map((li) => li.shopifyVariantId))];
       const q = `#graphql
-        query POVariantOptions($ids: [ID!]!) {
+        query POVariantInfo($ids: [ID!]!) {
           nodes(ids: $ids) {
-            ... on ProductVariant { id selectedOptions { name value } }
+            ... on ProductVariant {
+              id
+              selectedOptions { name value }
+              image { url }
+            }
           }
         }
       `;
       const resp = await admin.graphql(q, { variables: { ids } });
       const data = (await resp.json()) as any;
       for (const node of data.data?.nodes ?? []) {
-        if (node?.id) variantOptions[node.id] = node.selectedOptions ?? [];
+        if (!node?.id) continue;
+        variantInfo[node.id] = {
+          selectedOptions: node.selectedOptions ?? [],
+          imageUrl: node.image?.url ?? null,
+        };
       }
     } catch {
-      // Best-effort — grid view falls back to variantTitle parsing below
+      // Best-effort — fall back to variantTitle parsing for options and
+      // product featuredImage for the thumbnail below.
     }
   }
 
-  // Fetch product featuredImage + metafields (for the "cutting ticket" field)
-  // for every unique product on the PO, in one batched GraphQL call.
+  // Fetch product-level fallback image (featuredImage) + cutting-ticket
+  // metafield for every unique product on the PO. The image is only used
+  // when the variant has no image of its own.
   const productIds = [
     ...new Set(po.lineItems.map((li) => li.shopifyProductId)),
   ];
@@ -81,8 +96,6 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       const data = (await resp.json()) as any;
       for (const node of data.data?.nodes ?? []) {
         if (!node?.id) continue;
-        // Cutting ticket: any metafield whose namespace or key contains
-        // "cutting". First match wins. Supports various merchant naming.
         let cuttingTicket: string | null = null;
         for (const edge of node.metafields?.edges ?? []) {
           const { namespace, key, value } = edge.node;
@@ -102,13 +115,19 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     }
   }
 
-  // Fetch each unique image as base64 so jsPDF can embed it. Best-effort —
-  // a missing/slow image just means the row renders without a thumbnail.
+  // Each line resolves its image URL: variant.image first, product
+  // featuredImage as fallback. Then we batch-fetch unique URLs as base64.
+  const lineImageUrlByVariantId: Record<string, string | null> = {};
+  for (const li of po.lineItems) {
+    const variantImg = variantInfo[li.shopifyVariantId]?.imageUrl ?? null;
+    const productImg = productMeta[li.shopifyProductId]?.imageUrl ?? null;
+    lineImageUrlByVariantId[li.shopifyVariantId] = variantImg ?? productImg;
+  }
   const uniqueImageUrls = [
     ...new Set(
-      Object.values(productMeta)
-        .map((m) => m.imageUrl)
-        .filter((u): u is string => !!u),
+      Object.values(lineImageUrlByVariantId).filter(
+        (u): u is string => !!u,
+      ),
     ),
   ];
   const imageDataUrls: Record<string, string> = {};
@@ -128,11 +147,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   );
 
   const lineItems = po.lineItems.map((li) => {
-    let options = variantOptions[li.shopifyVariantId];
+    let options = variantInfo[li.shopifyVariantId]?.selectedOptions;
     if (!options && view === "grid") {
       // Fallback: parse "M / Red" → [{name:"Size",value:"M"},{name:"Color",value:"Red"}]
-      // Heuristic only — we don't know the real option names, so we guess
-      // based on well-known size tokens.
       const parts = li.variantTitle.split(" / ").map((p) => p.trim());
       const sizeTokens = new Set([
         "XXS",
@@ -151,13 +168,12 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
         value: p,
       }));
     }
+    const lineImg = lineImageUrlByVariantId[li.shopifyVariantId];
     const meta = productMeta[li.shopifyProductId];
     return {
       ...li,
       selectedOptions: options,
-      imageDataUrl: meta?.imageUrl
-        ? imageDataUrls[meta.imageUrl] ?? null
-        : null,
+      imageDataUrl: lineImg ? imageDataUrls[lineImg] ?? null : null,
       cuttingTicket: meta?.cuttingTicket ?? null,
     };
   });
@@ -168,6 +184,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     po: {
       poNumber: po.poNumber,
       poNumberExt: po.poNumberExt ?? null,
+      name: po.name ?? null,
       vendor: po.vendor ?? null,
       status: po.status,
       shippingDate: po.shippingDate,
