@@ -19,8 +19,14 @@ import {
   Banner,
   Icon,
   Spinner,
+  Collapsible,
+  Badge,
 } from "@shopify/polaris";
-import { SearchIcon } from "@shopify/polaris-icons";
+import {
+  SearchIcon,
+  ChevronUpIcon,
+  ChevronDownIcon,
+} from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import {
@@ -33,14 +39,24 @@ import { searchProducts } from "../services/shopify-api/products.server";
 import { createTransfer } from "../services/transfers/transfer-service.server";
 import { LocationPicker } from "../components/LocationPicker";
 import { ProductGrid, type GridCell } from "../components/ProductGrid";
+import {
+  ProductPicker,
+  type PickerProduct,
+  type PickerVariant,
+} from "../components/ProductPicker";
 
-interface SearchHit {
-  variantId: string;
-  productId: string;
-  productTitle: string;
-  variantTitle: string;
+interface SearchVariant {
+  id: string;
+  title: string;
   sku: string | null;
+  inStock: number;
   selectedOptions: Array<{ name: string; value: string }>;
+}
+
+interface SearchProduct {
+  id: string;
+  title: string;
+  variants: SearchVariant[];
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -62,26 +78,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "search") {
     const query = String(formData.get("query") ?? "").trim();
-    if (!query) return json({ hits: [] as SearchHit[] });
+    if (!query) return json({ products: [] as SearchProduct[] });
     try {
       const result = await searchProducts(admin, query);
-      const hits: SearchHit[] = [];
-      for (const edge of result.edges as Array<{ node: any }>) {
+      const products: SearchProduct[] = (
+        result.edges as Array<{ node: any }>
+      ).map((edge) => {
         const p = edge.node;
-        for (const v of p.variants.edges as Array<{ node: any }>) {
-          hits.push({
-            variantId: v.node.id,
-            productId: p.id,
-            productTitle: p.title,
-            variantTitle: v.node.title,
+        return {
+          id: p.id,
+          title: p.title,
+          variants: (p.variants.edges as Array<{ node: any }>).map((v) => ({
+            id: v.node.id,
+            title: v.node.title,
             sku: v.node.sku ?? null,
+            inStock: v.node.inventoryQuantity ?? 0,
             selectedOptions: v.node.selectedOptions ?? [],
-          });
-        }
-      }
-      return json({ hits });
+          })),
+        };
+      });
+      return json({ products });
     } catch (error) {
-      return json({ hits: [] as SearchHit[], error: String(error) });
+      return json({ products: [] as SearchProduct[], error: String(error) });
     }
   }
 
@@ -132,7 +150,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return json({});
 };
 
-interface TransferRow extends SearchHit {
+interface TransferRow {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  selectedOptions: Array<{ name: string; value: string }>;
   fromStock: number;
   quantitySent: number;
 }
@@ -150,13 +174,14 @@ export default function NewTransfer() {
   const [toLocationId, setToLocationId] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [products, setProducts] = useState<SearchProduct[]>([]);
   const [rows, setRows] = useState<TransferRow[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [pickerCollapsed, setPickerCollapsed] = useState(false);
 
   useEffect(() => {
     if (!query.trim()) {
-      setHits([]);
+      setProducts([]);
       return;
     }
     setIsSearching(true);
@@ -171,8 +196,8 @@ export default function NewTransfer() {
 
   useEffect(() => {
     if (!actionData) return;
-    if ("hits" in actionData) {
-      setHits(actionData.hits);
+    if ("products" in actionData) {
+      setProducts(actionData.products as SearchProduct[]);
       setIsSearching(false);
     }
     if ("stock" in actionData) {
@@ -186,22 +211,87 @@ export default function NewTransfer() {
     }
   }, [actionData]);
 
-  const handleAdd = useCallback(
-    (hit: SearchHit) => {
-      if (rows.some((r) => r.variantId === hit.variantId)) return;
-      setRows((prev) => [
-        ...prev,
-        { ...hit, fromStock: 0, quantitySent: 0 },
-      ]);
-      if (fromLocationId) {
-        const fd = new FormData();
-        fd.set("intent", "loadStock");
-        fd.set("locationId", fromLocationId);
-        fd.set("variantIds", JSON.stringify([hit.variantId]));
-        submit(fd, { method: "post" });
+  const selectedVariantIds = useMemo(
+    () => new Set(rows.map((r) => r.variantId)),
+    [rows],
+  );
+
+  // Pull from-location stock for a freshly added set of variant ids.
+  const loadStockFor = useCallback(
+    (variantIds: string[]) => {
+      if (!fromLocationId || variantIds.length === 0) return;
+      const fd = new FormData();
+      fd.set("intent", "loadStock");
+      fd.set("locationId", fromLocationId);
+      fd.set("variantIds", JSON.stringify(variantIds));
+      submit(fd, { method: "post" });
+    },
+    [fromLocationId, submit],
+  );
+
+  const handleToggleVariant = useCallback(
+    (
+      product: PickerProduct,
+      variant: PickerVariant,
+      checked: boolean,
+    ) => {
+      if (checked) {
+        setRows((prev) =>
+          prev.some((r) => r.variantId === variant.id)
+            ? prev
+            : [
+                ...prev,
+                {
+                  variantId: variant.id,
+                  productId: product.id,
+                  productTitle: product.title,
+                  variantTitle: variant.title,
+                  sku: variant.sku,
+                  selectedOptions: variant.selectedOptions,
+                  fromStock: variant.inStock ?? 0,
+                  quantitySent: 0,
+                },
+              ],
+        );
+        loadStockFor([variant.id]);
+      } else {
+        setRows((prev) => prev.filter((r) => r.variantId !== variant.id));
       }
     },
-    [rows, fromLocationId, submit],
+    [loadStockFor],
+  );
+
+  const handleToggleGroup = useCallback(
+    (
+      product: PickerProduct,
+      groupVariants: PickerVariant[],
+      checked: boolean,
+    ) => {
+      if (checked) {
+        const toAdd = groupVariants.filter(
+          (v) => !rows.some((r) => r.variantId === v.id),
+        );
+        if (toAdd.length === 0) return;
+        setRows((prev) => [
+          ...prev,
+          ...toAdd.map((variant) => ({
+            variantId: variant.id,
+            productId: product.id,
+            productTitle: product.title,
+            variantTitle: variant.title,
+            sku: variant.sku,
+            selectedOptions: variant.selectedOptions,
+            fromStock: variant.inStock ?? 0,
+            quantitySent: 0,
+          })),
+        ]);
+        loadStockFor(toAdd.map((v) => v.id));
+      } else {
+        const ids = new Set(groupVariants.map((v) => v.id));
+        setRows((prev) => prev.filter((r) => !ids.has(r.variantId)));
+      }
+    },
+    [rows, loadStockFor],
   );
 
   // Reload stock when from-location changes
@@ -325,67 +415,77 @@ export default function NewTransfer() {
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
-              <Text as="h2" variant="headingMd">
-                Add products
-              </Text>
-              <TextField
-                label="Search"
-                labelHidden
-                value={query}
-                onChange={setQuery}
-                placeholder="Search by product, SKU, or vendor…"
-                autoComplete="off"
-                prefix={<Icon source={SearchIcon} />}
-                clearButton
-                onClearButtonClick={() => {
-                  setQuery("");
-                  setHits([]);
-                }}
-              />
-              {isSearching && (
+              <InlineStack align="space-between" blockAlign="center">
                 <InlineStack gap="200" blockAlign="center">
-                  <Spinner size="small" />
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    Searching…
-                  </Text>
+                  <button
+                    type="button"
+                    onClick={() => setPickerCollapsed((v) => !v)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    <Text as="h2" variant="headingMd">
+                      Add products
+                    </Text>
+                  </button>
+                  {rows.length > 0 && (
+                    <Badge tone="info">{`${rows.length} selected`}</Badge>
+                  )}
+                  {isSearching && <Spinner size="small" />}
                 </InlineStack>
-              )}
-              {hits.length > 0 && (
-                <BlockStack gap="100">
-                  {hits.map((h) => {
-                    const added = rows.some(
-                      (r) => r.variantId === h.variantId,
-                    );
-                    return (
-                      <InlineStack
-                        key={h.variantId}
-                        align="space-between"
-                        blockAlign="center"
-                      >
-                        <Text as="p" variant="bodyMd">
-                          {h.productTitle} —{" "}
-                          <Text as="span" tone="subdued">
-                            {h.variantTitle}
-                          </Text>
-                          {h.sku && (
-                            <Text as="span" variant="bodySm" tone="subdued">
-                              {" "}
-                              ({h.sku})
-                            </Text>
-                          )}
-                        </Text>
-                        <Button
-                          size="slim"
-                          disabled={added}
-                          onClick={() => handleAdd(h)}
-                        >
-                          {added ? "Added" : "Add"}
-                        </Button>
-                      </InlineStack>
-                    );
-                  })}
+                <Button
+                  icon={
+                    pickerCollapsed ? ChevronDownIcon : ChevronUpIcon
+                  }
+                  onClick={() => setPickerCollapsed((v) => !v)}
+                >
+                  {pickerCollapsed ? "Expand section" : "Collapse section"}
+                </Button>
+              </InlineStack>
+
+              <Collapsible
+                id="transfer-product-picker"
+                open={!pickerCollapsed}
+                transition={{
+                  duration: "150ms",
+                  timingFunction: "ease-in-out",
+                }}
+                expandOnPrint
+              >
+                <BlockStack gap="400">
+                  <TextField
+                    label="Search"
+                    labelHidden
+                    value={query}
+                    onChange={setQuery}
+                    placeholder="Search by product, SKU, or vendor…"
+                    autoComplete="off"
+                    prefix={<Icon source={SearchIcon} />}
+                    clearButton
+                    onClearButtonClick={() => {
+                      setQuery("");
+                      setProducts([]);
+                    }}
+                  />
+                  {!isSearching &&
+                    query.trim() !== "" &&
+                    products.length === 0 && (
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        No products match “{query}”.
+                      </Text>
+                    )}
+                  <ProductPicker
+                    products={products as PickerProduct[]}
+                    selectedVariantIds={selectedVariantIds}
+                    onToggleVariant={handleToggleVariant}
+                    onToggleGroup={handleToggleGroup}
+                  />
                 </BlockStack>
-              )}
+              </Collapsible>
             </BlockStack>
           </Card>
         </Layout.Section>
