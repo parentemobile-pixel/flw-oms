@@ -179,6 +179,29 @@ export default function NewTransfer() {
   const [isSearching, setIsSearching] = useState(false);
   const [pickerCollapsed, setPickerCollapsed] = useState(false);
 
+  // Keep "To" valid relative to "From". If the user picks a From that
+  // happens to be the location currently selected as To (common when
+  // reversing a transfer — From defaults to the main store, you switch
+  // From to the new store, but To is still the new store from its
+  // initial default), From === To and the Create button silently stays
+  // disabled. LocationPicker won't self-correct because its value is
+  // already set. Reset To to the first remaining location whenever it's
+  // missing, equal to From, or no longer in the filtered option list.
+  // Set a concrete value (not null) so LocationPicker's localStorage
+  // restore can't immediately re-pick the colliding location.
+  useEffect(() => {
+    if (!fromLocationId) return;
+    const available = locations.filter((l) => l.id !== fromLocationId);
+    const toIsValid =
+      toLocationId != null &&
+      toLocationId !== fromLocationId &&
+      available.some((l) => l.id === toLocationId);
+    if (!toIsValid) {
+      setToLocationId(available[0]?.id ?? null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromLocationId, locations]);
+
   useEffect(() => {
     if (!query.trim()) {
       setProducts([]);
