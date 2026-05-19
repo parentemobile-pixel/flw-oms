@@ -92,6 +92,16 @@ export default function TransfersList() {
       <IndexTable.Cell>
         {t.receivedAt ? new Date(t.receivedAt).toLocaleDateString() : "—"}
       </IndexTable.Cell>
+      <IndexTable.Cell>
+        {t.trackingNumber ? (
+          <Text as="span" variant="bodySm">
+            {t.trackingCarrier ? `${t.trackingCarrier} · ` : ""}
+            {t.trackingNumber}
+          </Text>
+        ) : (
+          "—"
+        )}
+      </IndexTable.Cell>
     </IndexTable.Row>
   ));
 
@@ -120,6 +130,7 @@ export default function TransfersList() {
                   { title: "Created" },
                   { title: "Sent" },
                   { title: "Received" },
+                  { title: "Tracking" },
                 ]}
               >
                 {rows}

@@ -78,6 +78,31 @@ export async function getTransfer(shop: string, id: string) {
 }
 
 /**
+ * Save a manually-entered tracking number + carrier on a transfer.
+ * Empty strings clear the field. shop-scoped so a stale id from
+ * another store can't be written.
+ */
+export async function setTransferTracking(
+  shop: string,
+  id: string,
+  carrier: string | null,
+  trackingNumber: string | null,
+) {
+  const existing = await db.inventoryTransfer.findFirst({
+    where: { shop, id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Transfer not found");
+  return db.inventoryTransfer.update({
+    where: { id },
+    data: {
+      trackingCarrier: carrier?.trim() || null,
+      trackingNumber: trackingNumber?.trim() || null,
+    },
+  });
+}
+
+/**
  * Execute the "send" step — subtract quantities at the source location.
  * Wraps adjustInventoryBatch and records an InventoryAdjustmentSession.
  * On success, transitions transfer to in_transit.

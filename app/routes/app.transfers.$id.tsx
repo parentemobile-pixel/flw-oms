@@ -24,6 +24,7 @@ import {
   sendTransfer,
   receiveTransfer,
   cancelTransfer,
+  setTransferTracking,
 } from "../services/transfers/transfer-service.server";
 import { getLocations } from "../services/shopify-api/locations.server";
 
@@ -61,6 +62,15 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       await receiveTransfer(admin, session.shop, params.id!, receipts);
       return json({ ok: true as const });
     }
+    if (intent === "update-tracking") {
+      await setTransferTracking(
+        session.shop,
+        params.id!,
+        (formData.get("trackingCarrier") as string) || null,
+        (formData.get("trackingNumber") as string) || null,
+      );
+      return json({ ok: true as const });
+    }
   } catch (error) {
     return json({ error: String(error) });
   }
@@ -83,6 +93,25 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
+/**
+ * Build a "track this package" URL. Matches the carrier name loosely
+ * (the field is free text) against the big three; anything else falls
+ * back to a Google search of the tracking number, which reliably lands
+ * on the right carrier's tracking page.
+ */
+function trackingUrl(carrier: string | null, num: string): string {
+  const c = (carrier ?? "").toLowerCase();
+  const n = encodeURIComponent(num.trim());
+  if (c.includes("ups")) return `https://www.ups.com/track?tracknum=${n}`;
+  if (c.includes("fedex"))
+    return `https://www.fedex.com/fedextrack/?trknbr=${n}`;
+  if (c.includes("usps"))
+    return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${n}`;
+  if (c.includes("dhl"))
+    return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${n}`;
+  return `https://www.google.com/search?q=${n}`;
+}
+
 export default function TransferDetail() {
   const { t, fromName, toName } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -96,6 +125,21 @@ export default function TransferDetail() {
     for (const li of t.lineItems) init[li.id] = li.quantityReceived;
     return init;
   });
+
+  // Tracking — manually entered carrier + number.
+  const [trackingCarrier, setTrackingCarrier] = useState(
+    t.trackingCarrier ?? "",
+  );
+  const [trackingNumber, setTrackingNumber] = useState(
+    t.trackingNumber ?? "",
+  );
+  const handleSaveTracking = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "update-tracking");
+    fd.set("trackingCarrier", trackingCarrier);
+    fd.set("trackingNumber", trackingNumber);
+    submit(fd, { method: "post" });
+  }, [trackingCarrier, trackingNumber, submit]);
 
   const handleSend = useCallback(() => {
     const fd = new FormData();
@@ -234,6 +278,62 @@ export default function TransferDetail() {
             </BlockStack>
           </Card>
         </Layout.Section>
+
+        {/* Shipping & tracking — manually entered */}
+        {t.status !== "cancelled" && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="400">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="h2" variant="headingMd">
+                    Shipping & tracking
+                  </Text>
+                  {t.trackingNumber && (
+                    <Button
+                      url={trackingUrl(t.trackingCarrier, t.trackingNumber)}
+                      target="_blank"
+                      variant="plain"
+                    >
+                      Track package ↗
+                    </Button>
+                  )}
+                </InlineStack>
+                <InlineStack gap="400" wrap>
+                  <div style={{ flex: "0 0 200px" }}>
+                    <TextField
+                      label="Carrier"
+                      value={trackingCarrier}
+                      onChange={setTrackingCarrier}
+                      autoComplete="off"
+                      placeholder="UPS, FedEx, USPS…"
+                    />
+                  </div>
+                  <div style={{ flex: "1 1 280px", minWidth: "240px" }}>
+                    <TextField
+                      label="Tracking number"
+                      value={trackingNumber}
+                      onChange={setTrackingNumber}
+                      autoComplete="off"
+                      placeholder="Paste the carrier tracking number"
+                    />
+                  </div>
+                  <div style={{ alignSelf: "flex-end" }}>
+                    <Button
+                      onClick={handleSaveTracking}
+                      loading={isBusy}
+                      disabled={
+                        trackingCarrier === (t.trackingCarrier ?? "") &&
+                        trackingNumber === (t.trackingNumber ?? "")
+                      }
+                    >
+                      Save tracking
+                    </Button>
+                  </div>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
 
         {/* Line items */}
         <Layout.Section>

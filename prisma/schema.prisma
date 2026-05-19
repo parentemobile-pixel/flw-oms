@@ -171,6 +171,8 @@ model InventoryTransfer {
   toLocationId   String
   status         String    @default("draft") // draft | in_transit | received | cancelled
   notes          String?
+  trackingCarrier String?  // free-text carrier name (UPS, FedEx, USPS, …)
+  trackingNumber  String?  // manually entered; links out to carrier tracking
   createdAt      DateTime  @default(now())
   sentAt         DateTime?
   receivedAt     DateTime?
