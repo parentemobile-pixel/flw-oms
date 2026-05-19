@@ -36,6 +36,23 @@ const INVENTORY_ITEM_UPDATE_MUTATION = `#graphql
   }
 `;
 
+// Stock an inventory item at a location so subsequent adjustments are
+// allowed. Deliberately omits the optional `available` argument —
+// re-activating an already-stocked item without it is a safe no-op
+// (returns the existing level, no quantity change), which lets us call
+// this for every pair in a failed batch without risking double counts.
+const INVENTORY_ACTIVATE_MUTATION = `#graphql
+  mutation ActivateInventory($inventoryItemId: ID!, $locationId: ID!) {
+    inventoryActivate(
+      inventoryItemId: $inventoryItemId
+      locationId: $locationId
+    ) {
+      inventoryLevel { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 // ============================================
 // QUERIES
 // ============================================
@@ -143,6 +160,107 @@ export interface AdjustChange {
 // ============================================
 
 /**
+ * Stock the given (inventoryItem, location) pairs so they can be
+ * adjusted. De-dupes pairs; one `inventoryActivate` call each (Shopify
+ * has no bulk activate). Already-stocked pairs are a safe no-op because
+ * we never pass `available`. Best-effort: a per-pair failure is logged
+ * but doesn't throw — the subsequent adjust retry surfaces the real
+ * problem if activation genuinely couldn't happen.
+ */
+export async function activateInventoryItemsBatch(
+  admin: AdminApiContext,
+  pairs: Array<{ inventoryItemId: string; locationId: string }>,
+): Promise<void> {
+  const seen = new Set<string>();
+  const unique = pairs.filter((p) => {
+    const k = `${p.inventoryItemId}::${p.locationId}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  await Promise.all(
+    unique.map(async ({ inventoryItemId, locationId }) => {
+      try {
+        const response = await admin.graphql(INVENTORY_ACTIVATE_MUTATION, {
+          variables: { inventoryItemId, locationId },
+        });
+        const data = (await response.json()) as any;
+        const errs = data?.data?.inventoryActivate?.userErrors ?? [];
+        if (errs.length > 0) {
+          console.warn(
+            `inventoryActivate(${inventoryItemId} @ ${locationId}) userErrors:`,
+            errs.map((e: { message: string }) => e.message).join("; "),
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `inventoryActivate(${inventoryItemId} @ ${locationId}) threw:`,
+          err,
+        );
+      }
+    }),
+  );
+}
+
+/** True when Shopify rejected an adjust because the item isn't stocked there. */
+function isNotStockedError(userErrors: Array<{ message: string }>): boolean {
+  return userErrors.some((e) =>
+    /not stocked at the location/i.test(e.message ?? ""),
+  );
+}
+
+/**
+ * Core adjust call shared by `adjustInventory` and `adjustInventoryBatch`.
+ * Self-heals the "inventory item is not stocked at the location" error:
+ * if Shopify rejects with it, activate every (item, location) pair in the
+ * batch and retry the whole adjust once. Activating already-stocked pairs
+ * is harmless (no `available` passed), so we don't need to know which
+ * specific pair failed — Shopify's userErrors don't map cleanly to a
+ * change index anyway. The common already-stocked path runs exactly one
+ * mutation (no overhead).
+ */
+async function runAdjust(
+  admin: AdminApiContext,
+  changes: AdjustChange[],
+  reason: InventoryAdjustReason,
+) {
+  const send = async () => {
+    const response = await admin.graphql(ADJUST_INVENTORY_MUTATION, {
+      variables: {
+        input: {
+          reason,
+          name: "available",
+          changes: changes.map((c) => ({
+            delta: c.delta,
+            inventoryItemId: c.inventoryItemId,
+            locationId: c.locationId,
+          })),
+        },
+      },
+    });
+    const data = (await response.json()) as any;
+    return data.data.inventoryAdjustQuantities;
+  };
+
+  const first = await send();
+  const userErrors = first?.userErrors ?? [];
+  if (userErrors.length === 0 || !isNotStockedError(userErrors)) {
+    return first;
+  }
+
+  // Stock every pair in this batch, then retry once.
+  await activateInventoryItemsBatch(
+    admin,
+    changes.map((c) => ({
+      inventoryItemId: c.inventoryItemId,
+      locationId: c.locationId,
+    })),
+  );
+  return send();
+}
+
+/**
  * Adjust inventory at ONE (inventoryItem, location) by a delta.
  * For bulk/multi-variant adjustments see `adjustInventoryBatch`.
  */
@@ -153,18 +271,7 @@ export async function adjustInventory(
   delta: number,
   reason: InventoryAdjustReason = "correction",
 ) {
-  const response = await admin.graphql(ADJUST_INVENTORY_MUTATION, {
-    variables: {
-      input: {
-        reason,
-        name: "available",
-        changes: [{ delta, inventoryItemId, locationId }],
-      },
-    },
-  });
-
-  const data = (await response.json()) as any;
-  return data.data.inventoryAdjustQuantities;
+  return runAdjust(admin, [{ inventoryItemId, locationId, delta }], reason);
 }
 
 /**
@@ -182,23 +289,7 @@ export async function adjustInventoryBatch(
   if (changes.length === 0) {
     return { inventoryAdjustmentGroup: null, userErrors: [] };
   }
-
-  const response = await admin.graphql(ADJUST_INVENTORY_MUTATION, {
-    variables: {
-      input: {
-        reason,
-        name: "available",
-        changes: changes.map((c) => ({
-          delta: c.delta,
-          inventoryItemId: c.inventoryItemId,
-          locationId: c.locationId,
-        })),
-      },
-    },
-  });
-
-  const data = (await response.json()) as any;
-  return data.data.inventoryAdjustQuantities;
+  return runAdjust(admin, changes, reason);
 }
 
 /**
