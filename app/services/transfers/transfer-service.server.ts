@@ -1,5 +1,4 @@
 import db from "../../db.server";
-import { format } from "date-fns";
 import type { AdminApiContext } from "@shopify/shopify-app-remix/server";
 import {
   adjustInventoryBatch,
@@ -16,18 +15,37 @@ export interface TransferLineItemInput {
 }
 
 export interface CreateTransferInput {
+  name?: string | null;
   fromLocationId: string;
   toLocationId: string;
   notes?: string | null;
   lineItems: TransferLineItemInput[];
 }
 
+/**
+ * Transfer numbers are now plain 4-digit sequential integers starting at
+ * 1001 ("1001", "1002", …) — short, scannable, no date prefix. Computed
+ * as max(existing parseable transferNumber) + 1 so a delete can't recycle
+ * an existing number (would violate the unique constraint). Old-format
+ * numbers like "TR-20260519-001" don't parse cleanly so they're ignored
+ * for the max — new transfers will start at 1001 regardless.
+ */
 export async function generateTransferNumber(shop: string): Promise<string> {
-  const today = format(new Date(), "yyyyMMdd");
-  const existing = await db.inventoryTransfer.count({
-    where: { shop, transferNumber: { startsWith: `TR-${today}` } },
+  const existing = await db.inventoryTransfer.findMany({
+    where: { shop },
+    select: { transferNumber: true },
   });
-  return `TR-${today}-${String(existing + 1).padStart(3, "0")}`;
+  let maxSeq = 1000;
+  for (const { transferNumber } of existing) {
+    const n = parseInt(transferNumber, 10);
+    // Only count numbers that ARE the whole string — skip legacy
+    // "TR-..." formatted entries so they don't accidentally inflate the
+    // counter (parseInt would otherwise read "20260519" out of "TR-20260519-001").
+    if (Number.isFinite(n) && String(n) === transferNumber && n > maxSeq) {
+      maxSeq = n;
+    }
+  }
+  return String(maxSeq + 1);
 }
 
 export async function createTransfer(shop: string, data: CreateTransferInput) {
@@ -44,6 +62,7 @@ export async function createTransfer(shop: string, data: CreateTransferInput) {
     data: {
       shop,
       transferNumber,
+      name: data.name ?? null,
       fromLocationId: data.fromLocationId,
       toLocationId: data.toLocationId,
       notes: data.notes ?? null,
@@ -74,6 +93,26 @@ export async function getTransfer(shop: string, id: string) {
   return db.inventoryTransfer.findFirst({
     where: { shop, id },
     include: { lineItems: true },
+  });
+}
+
+/**
+ * Update the human-friendly name on a transfer. Empty/whitespace
+ * clears it. shop-scoped to keep stale ids from another store out.
+ */
+export async function setTransferName(
+  shop: string,
+  id: string,
+  name: string | null,
+) {
+  const existing = await db.inventoryTransfer.findFirst({
+    where: { shop, id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Transfer not found");
+  return db.inventoryTransfer.update({
+    where: { id },
+    data: { name: name?.trim() || null },
   });
 }
 

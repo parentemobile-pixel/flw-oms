@@ -121,6 +121,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "create") {
     const fromLocationId = String(formData.get("fromLocationId") ?? "");
     const toLocationId = String(formData.get("toLocationId") ?? "");
+    const name = (String(formData.get("name") ?? "")).trim() || null;
     const notes = String(formData.get("notes") ?? "") || null;
     const lineItems = JSON.parse(
       String(formData.get("lineItems") ?? "[]"),
@@ -135,6 +136,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     try {
       const t = await createTransfer(session.shop, {
+        name,
         fromLocationId,
         toLocationId,
         notes,
@@ -172,6 +174,7 @@ export default function NewTransfer() {
     defaultLocationId,
   );
   const [toLocationId, setToLocationId] = useState<string | null>(null);
+  const [name, setName] = useState("");
   const [notes, setNotes] = useState("");
   const [query, setQuery] = useState("");
   const [products, setProducts] = useState<SearchProduct[]>([]);
@@ -363,6 +366,7 @@ export default function NewTransfer() {
     fd.set("intent", "create");
     fd.set("fromLocationId", fromLocationId);
     fd.set("toLocationId", toLocationId);
+    fd.set("name", name);
     fd.set("notes", notes);
     fd.set(
       "lineItems",
@@ -380,7 +384,7 @@ export default function NewTransfer() {
       ),
     );
     submit(fd, { method: "post" });
-  }, [canCreate, fromLocationId, toLocationId, notes, rows, submit]);
+  }, [canCreate, fromLocationId, toLocationId, name, notes, rows, submit]);
 
   const totalUnits = rows.reduce((s, r) => s + r.quantitySent, 0);
 
@@ -400,8 +404,16 @@ export default function NewTransfer() {
           <Card>
             <BlockStack gap="400">
               <Text as="h2" variant="headingMd">
-                Locations
+                Transfer details
               </Text>
+              <TextField
+                label="Transfer name"
+                value={name}
+                onChange={setName}
+                autoComplete="off"
+                placeholder="e.g. FW25 Marblehead initial stock"
+                helpText="A short label to recognize this transfer at a glance — shown as the primary title in the list view."
+              />
               <InlineStack gap="400" wrap>
                 <div style={{ flex: 1, minWidth: "240px" }}>
                   <LocationPicker

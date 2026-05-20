@@ -9,6 +9,7 @@ import {
   Badge,
   Text,
   EmptyState,
+  BlockStack,
 } from "@shopify/polaris";
 
 import { authenticate } from "../shopify.server";
@@ -68,9 +69,18 @@ export default function TransfersList() {
           to={`/app/transfers/${t.id}`}
           style={{ textDecoration: "none" }}
         >
-          <Text variant="bodyMd" fontWeight="bold" as="span">
-            {t.transferNumber}
-          </Text>
+          <BlockStack gap="050">
+            <Text variant="bodyMd" fontWeight="bold" as="span">
+              {t.name || t.transferNumber}
+            </Text>
+            {/* Always show the transfer # as a secondary line so it's
+                still scannable even when the user gave it a name. */}
+            {t.name && (
+              <Text variant="bodySm" tone="subdued" as="span">
+                #{t.transferNumber}
+              </Text>
+            )}
+          </BlockStack>
         </Link>
       </IndexTable.Cell>
       <IndexTable.Cell>{t.fromName}</IndexTable.Cell>
@@ -122,7 +132,7 @@ export default function TransfersList() {
                 itemCount={transfers.length}
                 selectable={false}
                 headings={[
-                  { title: "Transfer #" },
+                  { title: "Transfer" },
                   { title: "From" },
                   { title: "To" },
                   { title: "Status" },

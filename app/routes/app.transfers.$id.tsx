@@ -25,6 +25,7 @@ import {
   receiveTransfer,
   cancelTransfer,
   setTransferTracking,
+  setTransferName,
 } from "../services/transfers/transfer-service.server";
 import { getLocations } from "../services/shopify-api/locations.server";
 
@@ -68,6 +69,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         params.id!,
         (formData.get("trackingCarrier") as string) || null,
         (formData.get("trackingNumber") as string) || null,
+      );
+      return json({ ok: true as const });
+    }
+    if (intent === "update-name") {
+      await setTransferName(
+        session.shop,
+        params.id!,
+        (formData.get("name") as string) || null,
       );
       return json({ ok: true as const });
     }
@@ -125,6 +134,15 @@ export default function TransferDetail() {
     for (const li of t.lineItems) init[li.id] = li.quantityReceived;
     return init;
   });
+
+  // Name — editable; falls back to transfer # as title.
+  const [name, setName] = useState(t.name ?? "");
+  const handleSaveName = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "update-name");
+    fd.set("name", name);
+    submit(fd, { method: "post" });
+  }, [name, submit]);
 
   // Tracking — manually entered carrier + number.
   const [trackingCarrier, setTrackingCarrier] = useState(
@@ -191,7 +209,10 @@ export default function TransferDetail() {
 
   return (
     <Page
-      title={t.transferNumber}
+      // Prefer the human-friendly name in the title; fall back to the
+      // transfer number when no name has been set yet.
+      title={t.name || t.transferNumber}
+      subtitle={t.name ? `#${t.transferNumber}` : undefined}
       backAction={{ url: "/app/transfers" }}
       titleMetadata={
         <Badge tone={STATUS_TONES[t.status] ?? "info"}>
@@ -278,6 +299,34 @@ export default function TransferDetail() {
             </BlockStack>
           </Card>
         </Layout.Section>
+
+        {/* Editable transfer name */}
+        {t.status !== "cancelled" && (
+          <Layout.Section>
+            <Card>
+              <InlineStack gap="400" wrap blockAlign="end">
+                <div style={{ flex: "1 1 320px", minWidth: "240px" }}>
+                  <TextField
+                    label="Transfer name"
+                    value={name}
+                    onChange={setName}
+                    autoComplete="off"
+                    placeholder="e.g. FW25 Marblehead initial stock"
+                  />
+                </div>
+                <div>
+                  <Button
+                    onClick={handleSaveName}
+                    loading={isBusy}
+                    disabled={name === (t.name ?? "")}
+                  >
+                    Save name
+                  </Button>
+                </div>
+              </InlineStack>
+            </Card>
+          </Layout.Section>
+        )}
 
         {/* Shipping & tracking — manually entered */}
         {t.status !== "cancelled" && (

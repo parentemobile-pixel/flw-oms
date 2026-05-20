@@ -167,6 +167,7 @@ model InventoryTransfer {
   id             String    @id @default(cuid())
   shop           String
   transferNumber String
+  name           String? // human-friendly label, primary display in lists
   fromLocationId String
   toLocationId   String
   status         String    @default("draft") // draft | in_transit | received | cancelled
