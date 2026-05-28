@@ -26,6 +26,7 @@ interface POLineForPdf {
 interface POForPdf {
   poNumber: string;
   poNumberExt: string | null;
+  designId: string | null;
   name: string | null;
   vendor: string | null;
   status: string;
@@ -104,6 +105,16 @@ export async function generatePOPdf(options: {
     doc.text(`Vendor PO #: `, margin, leftY + 0.15);
     doc.setFont("helvetica", "normal");
     doc.text(po.poNumberExt, margin + 0.95, leftY + 0.15);
+    leftY += 0.25;
+  }
+  if (po.designId) {
+    // Optional internal reference — only renders when the user filled
+    // it in on create / edit. Same look as Vendor PO # so the header
+    // stays consistent.
+    doc.setFont("helvetica", "bold");
+    doc.text(`Design ID: `, margin, leftY + 0.15);
+    doc.setFont("helvetica", "normal");
+    doc.text(po.designId, margin + 0.8, leftY + 0.15);
     leftY += 0.25;
   }
 

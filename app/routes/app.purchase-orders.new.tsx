@@ -137,6 +137,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const expectedDateStr = formData.get("expectedDate") as string;
     const shopifyLocationId = (formData.get("shopifyLocationId") as string) || null;
     const poNumberExt = (formData.get("poNumberExt") as string) || null;
+    const designId = (formData.get("designId") as string)?.trim() || null;
     const lineItemsJson = formData.get("lineItems") as string;
     const lineItems = JSON.parse(lineItemsJson) as SelectedVariant[];
 
@@ -156,6 +157,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         expectedDate: expectedDateStr ? new Date(expectedDateStr) : null,
         shopifyLocationId,
         poNumberExt,
+        designId,
         lineItems: lineItems
           .filter((li) => li.quantityOrdered > 0)
           .map((li) => ({
@@ -196,6 +198,7 @@ export default function NewPurchaseOrder() {
   const [shippingDate, setShippingDate] = useState("");
   const [expectedDate, setExpectedDate] = useState("");
   const [poNumberExt, setPoNumberExt] = useState("");
+  const [designId, setDesignId] = useState("");
   const [shopifyLocationId, setShopifyLocationId] = useState<string | null>(
     defaultLocationId,
   );
@@ -424,6 +427,7 @@ export default function NewPurchaseOrder() {
     formData.set("shippingDate", shippingDate);
     formData.set("expectedDate", expectedDate);
     formData.set("poNumberExt", poNumberExt);
+    formData.set("designId", designId);
     if (shopifyLocationId) formData.set("shopifyLocationId", shopifyLocationId);
     formData.set("lineItems", JSON.stringify(selectedItems));
     submit(formData, { method: "post" });
@@ -434,6 +438,7 @@ export default function NewPurchaseOrder() {
     shippingDate,
     expectedDate,
     poNumberExt,
+    designId,
     shopifyLocationId,
     selectedItems,
     submit,
@@ -608,6 +613,18 @@ export default function NewPurchaseOrder() {
                     autoComplete="off"
                     placeholder="(optional)"
                     helpText="If the vendor has their own PO number"
+                  />
+                </div>
+              </InlineStack>
+              <InlineStack gap="400" wrap={false}>
+                <div style={{ flex: 1 }}>
+                  <TextField
+                    label="Design ID"
+                    value={designId}
+                    onChange={setDesignId}
+                    autoComplete="off"
+                    placeholder="(optional)"
+                    helpText="Internal design or style reference — prints on the PO PDF when set."
                   />
                 </div>
               </InlineStack>

@@ -121,6 +121,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
         name: ((formData.get("name") as string) ?? "").trim() || null,
         vendor: (formData.get("vendor") as string) || null,
         poNumberExt: (formData.get("poNumberExt") as string) || null,
+        designId:
+          ((formData.get("designId") as string) ?? "").trim() || null,
         notes: (formData.get("notes") as string) || null,
         shippingDate:
           (formData.get("shippingDate") as string)
@@ -247,6 +249,7 @@ export default function PurchaseOrderDetail() {
   const [vendorInput, setVendorInput] = useState(po.vendor ?? "");
   const [name, setName] = useState(po.name ?? "");
   const [poNumberExt, setPoNumberExt] = useState(po.poNumberExt ?? "");
+  const [designId, setDesignId] = useState(po.designId ?? "");
   const [shippingDate, setShippingDate] = useState(
     dateInputValue(po.shippingDate),
   );
@@ -357,6 +360,7 @@ export default function PurchaseOrderDetail() {
     setVendorInput(po.vendor ?? "");
     setName(po.name ?? "");
     setPoNumberExt(po.poNumberExt ?? "");
+    setDesignId(po.designId ?? "");
     setShippingDate(dateInputValue(po.shippingDate));
     setExpectedDate(dateInputValue(po.expectedDate));
     setShopifyLocationId(po.shopifyLocationId);
@@ -415,6 +419,7 @@ export default function PurchaseOrderDetail() {
     fd.set("vendor", vendor || vendorInput);
     fd.set("name", name);
     fd.set("poNumberExt", poNumberExt);
+    fd.set("designId", designId);
     fd.set("shippingDate", shippingDate);
     fd.set("expectedDate", expectedDate);
     fd.set("notes", notes);
@@ -445,6 +450,7 @@ export default function PurchaseOrderDetail() {
     vendorInput,
     name,
     poNumberExt,
+    designId,
     shippingDate,
     expectedDate,
     notes,
@@ -566,6 +572,7 @@ export default function PurchaseOrderDetail() {
     setVendor(po.vendor ?? "");
     setVendorInput(po.vendor ?? "");
     setPoNumberExt(po.poNumberExt ?? "");
+    setDesignId(po.designId ?? "");
     setShippingDate(dateInputValue(po.shippingDate));
     setExpectedDate(dateInputValue(po.expectedDate));
     setShopifyLocationId(po.shopifyLocationId);
@@ -842,6 +849,16 @@ export default function PurchaseOrderDetail() {
                       placeholder="(optional)"
                     />
                   </div>
+                  <div style={{ flex: 1, minWidth: "240px" }}>
+                    <TextField
+                      label="Design ID"
+                      value={designId}
+                      onChange={setDesignId}
+                      autoComplete="off"
+                      placeholder="(optional)"
+                      helpText="Prints on the PO PDF when set."
+                    />
+                  </div>
                 </InlineStack>
                 <InlineStack gap="400" wrap>
                   <div style={{ flex: 1, minWidth: "200px" }}>
@@ -900,6 +917,16 @@ export default function PurchaseOrderDetail() {
                       </Text>
                       <Text as="p" variant="bodyMd">
                         {po.poNumberExt}
+                      </Text>
+                    </BlockStack>
+                  )}
+                  {po.designId && (
+                    <BlockStack gap="100">
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        Design ID
+                      </Text>
+                      <Text as="p" variant="bodyMd">
+                        {po.designId}
                       </Text>
                     </BlockStack>
                   )}

@@ -116,6 +116,7 @@ model PurchaseOrder {
   shop              String
   poNumber          String
   poNumberExt       String? // vendor's own PO #
+  designId          String? // internal design / style reference, printed on the PDF when set
   name              String? // human-friendly label, primary display in lists
   vendor            String?
   status            String    @default("draft") // draft | ordered | partially_received | received | cancelled

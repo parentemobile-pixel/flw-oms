@@ -184,6 +184,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     po: {
       poNumber: po.poNumber,
       poNumberExt: po.poNumberExt ?? null,
+      designId: po.designId ?? null,
       name: po.name ?? null,
       vendor: po.vendor ?? null,
       status: po.status,

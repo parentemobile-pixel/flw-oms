@@ -24,6 +24,7 @@ export interface CreatePOInput {
   expectedDate?: Date | null;
   shopifyLocationId?: string | null;
   poNumberExt?: string | null;
+  designId?: string | null;
   lineItems: POLineItemInput[];
 }
 
@@ -35,6 +36,7 @@ export interface UpdatePOInput {
   expectedDate?: Date | null;
   shopifyLocationId?: string | null;
   poNumberExt?: string | null;
+  designId?: string | null;
   lineItems?: POLineItemInput[]; // if provided, replaces existing line items
 }
 
@@ -126,6 +128,7 @@ export async function createPurchaseOrder(shop: string, data: CreatePOInput) {
       expectedDate: data.expectedDate ?? null,
       shopifyLocationId: data.shopifyLocationId ?? null,
       poNumberExt: data.poNumberExt ?? null,
+      designId: data.designId ?? null,
       totalCost,
       lineItems: {
         create: data.lineItems.map((li) => ({
@@ -278,6 +281,7 @@ export async function updatePurchaseOrder(
           : data.shopifyLocationId,
       poNumberExt:
         data.poNumberExt === undefined ? undefined : data.poNumberExt,
+      designId: data.designId === undefined ? undefined : data.designId,
       totalCost,
       ...(data.lineItems
         ? {
