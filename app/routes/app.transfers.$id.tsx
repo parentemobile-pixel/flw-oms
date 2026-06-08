@@ -193,6 +193,62 @@ export default function TransferDetail() {
     submit(fd, { method: "post" });
   }, [t.lineItems, receipts, submit]);
 
+  // ── Packing slip PDF downloads ─────────────────────────────────────
+  // Fetches inside the embedded iframe so the Shopify admin session
+  // cookie is available; trigger a blob download instead of a top-level
+  // navigation (which would open a new tab without session and lose
+  // the QR-bound URL handling). Same pattern as the PO PDF download in
+  // app.purchase-orders.$id._index.tsx.
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<
+    "line" | "grid" | null
+  >(null);
+  const downloadPdf = useCallback(
+    async (view: "line" | "grid") => {
+      if (isGeneratingPdf !== null) return;
+      setIsGeneratingPdf(view);
+      try {
+        const response = await fetch(
+          `/api/transfer-pdf/${t.id}?view=${view}`,
+        );
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(
+            `Packing slip endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+          );
+        }
+        const blob = await response.blob();
+        if (blob.size === 0) throw new Error("Generated PDF was empty.");
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objUrl;
+        a.download = `transfer-${t.transferNumber}-${view}.pdf`;
+        a.rel = "noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      } catch (error) {
+        console.error("Packing slip download failed:", error);
+        window.alert(
+          `Couldn't generate packing slip: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      } finally {
+        setIsGeneratingPdf(null);
+      }
+    },
+    [isGeneratingPdf, t.id, t.transferNumber],
+  );
+  const handlePackingSlipLine = useCallback(
+    () => downloadPdf("line"),
+    [downloadPdf],
+  );
+  const handlePackingSlipGrid = useCallback(
+    () => downloadPdf("grid"),
+    [downloadPdf],
+  );
+
   const totalSent = t.lineItems.reduce((s, li) => s + li.quantitySent, 0);
   const totalReceived = t.lineItems.reduce(
     (s, li) => s + li.quantityReceived,
@@ -219,6 +275,26 @@ export default function TransferDetail() {
           {STATUS_LABELS[t.status] ?? t.status}
         </Badge>
       }
+      secondaryActions={[
+        {
+          content:
+            isGeneratingPdf === "line"
+              ? "Generating…"
+              : "Packing slip (Line)",
+          onAction: handlePackingSlipLine,
+          loading: isGeneratingPdf === "line",
+          disabled: isGeneratingPdf !== null,
+        },
+        {
+          content:
+            isGeneratingPdf === "grid"
+              ? "Generating…"
+              : "Packing slip (Grid)",
+          onAction: handlePackingSlipGrid,
+          loading: isGeneratingPdf === "grid",
+          disabled: isGeneratingPdf !== null,
+        },
+      ]}
     >
       <Layout>
         {actionData && "ok" in actionData && (

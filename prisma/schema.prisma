@@ -173,6 +173,7 @@ model InventoryTransfer {
   toLocationId   String
   status         String    @default("draft") // draft | in_transit | received | cancelled
   notes          String?
+  receiveToken   String    @default(cuid()) // public scan-to-receive token (mirrors PO.receiveToken)
   trackingCarrier String?  // free-text carrier name (UPS, FedEx, USPS, …)
   trackingNumber  String?  // manually entered; links out to carrier tracking
   createdAt      DateTime  @default(now())
@@ -184,6 +185,7 @@ model InventoryTransfer {
 
   @@unique([shop, transferNumber])
   @@index([shop, status])
+  @@index([receiveToken])
 }
 
 model InventoryTransferLineItem {

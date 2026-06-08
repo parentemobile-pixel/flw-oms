@@ -97,6 +97,20 @@ export async function getTransfer(shop: string, id: string) {
 }
 
 /**
+ * Look up a transfer by its public `receiveToken`. The token is the
+ * authentication for the `/t/:token` scan-to-receive route — anyone
+ * holding the QR can land on the page (mirrors PO's
+ * `getPurchaseOrderByToken`). No shop scoping needed; the token's
+ * cuid() default makes it effectively unguessable.
+ */
+export async function getTransferByToken(token: string) {
+  return db.inventoryTransfer.findFirst({
+    where: { receiveToken: token },
+    include: { lineItems: true },
+  });
+}
+
+/**
  * Update the human-friendly name on a transfer. Empty/whitespace
  * clears it. shop-scoped to keep stale ids from another store out.
  */
