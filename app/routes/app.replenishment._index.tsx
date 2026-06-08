@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -236,19 +236,19 @@ export default function Replenishment() {
   const navigation = useNavigation();
   const isBusy = navigation.state === "submitting";
 
-  // Defaults: trailing 7 days. The user pulls this every Monday so a
-  // weekly window is the natural starting point.
-  const today = new Date();
-  const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-
   const [sourceLocationId, setSourceLocationId] = useState<string | null>(
     defaultSourceId,
   );
   const [destLocationId, setDestLocationId] = useState<string | null>(
     defaultDestId,
   );
-  const [startDate, setStartDate] = useState(isoDate(weekAgo));
-  const [endDate, setEndDate] = useState(isoDate(today));
+  // Lazy initializers for the date defaults so `new Date()` runs once
+  // per mount instead of on every render — avoids server / client
+  // hydration mismatches when SSR's `now` differs from the client's.
+  const [startDate, setStartDate] = useState(() =>
+    isoDate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)),
+  );
+  const [endDate, setEndDate] = useState(() => isoDate(new Date()));
 
   // The grid's editable cell = transfer qty. Seeded from
   // min(sold, sourceAvailable) so the typical "send what they sold"
@@ -258,15 +258,19 @@ export default function Replenishment() {
   const reportRows = actionData?.report?.rows ?? [];
   const reportSummary = actionData?.report?.summary;
 
-  // Seed transferQty when a fresh report arrives. Uses a memo + ref-free
-  // pattern: derive the seeded payload, apply on first arrival of a new
-  // report (detected by row count + a hash of variant ids).
+  // Stable key identifying which report is in view; we re-seed
+  // transferQty whenever it changes.
   const reportKey = useMemo(
     () => reportRows.map((r) => r.variantId).join(","),
     [reportRows],
   );
-  const [seededKey, setSeededKey] = useState<string | null>(null);
-  if (reportRows.length > 0 && seededKey !== reportKey) {
+
+  // Seed transferQty in a clean effect, not during render. The earlier
+  // "setState during render with a guard" pattern was technically legal
+  // but trips up React's strict-mode double-invoke check and is a
+  // known source of flaky behavior.
+  useEffect(() => {
+    if (reportRows.length === 0) return;
     const seed: Record<string, number> = {};
     for (const row of reportRows) {
       seed[row.variantId] = Math.max(
@@ -275,8 +279,11 @@ export default function Replenishment() {
       );
     }
     setTransferQty(seed);
-    setSeededKey(reportKey);
-  }
+    // reportKey is a stable scalar derived from reportRows; using it
+    // as the dep keeps this from re-running on every render that
+    // re-creates an empty array literal for actionData.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportKey]);
 
   const handleCellChange = useCallback((variantId: string, next: number) => {
     setTransferQty((prev) => ({ ...prev, [variantId]: Math.max(0, next) }));
