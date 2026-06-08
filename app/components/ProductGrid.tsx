@@ -101,6 +101,13 @@ interface ProductGridProps {
    */
   sizeColumns?: string[];
   /**
+   * Optional ReactNode rendered as a small line under the cell's qty
+   * input. Replenishment uses this to surface `"Sold N · MHD M"` per
+   * cell without crowding the column header. Other callers ignore the
+   * prop entirely — fully back-compat.
+   */
+  getCellSubtext?: (cell: GridCell) => ReactNode;
+  /**
    * Header label for the rightmost column. Defaults to "Row Total".
    * Paired with `renderRowTrailing` when the caller wants that column
    * to be something other than a numeric total.
@@ -176,6 +183,7 @@ export function ProductGrid({
   getCellStyle,
   groupBy,
   sizeColumns,
+  getCellSubtext,
   trailingLabel = "Row Total",
   renderRowTrailing,
 }: ProductGridProps) {
@@ -368,6 +376,7 @@ export function ProductGrid({
                       <InlineStack gap="200" wrap blockAlign="center">
                         {row.overflowCells.map(({ size, cell }) => {
                           const cellStyle = getCellStyle?.(cell);
+                          const subtext = getCellSubtext?.(cell);
                           return (
                             <InlineStack
                               key={cell.variantId}
@@ -409,6 +418,19 @@ export function ProductGrid({
                                   autoComplete="off"
                                   disabled={readonly}
                                 />
+                                {subtext != null && (
+                                  <div
+                                    style={{
+                                      fontSize: "10px",
+                                      color: "#6b7280",
+                                      textAlign: "center",
+                                      marginTop: "2px",
+                                      lineHeight: 1.2,
+                                    }}
+                                  >
+                                    {subtext}
+                                  </div>
+                                )}
                               </div>
                             </InlineStack>
                           );
@@ -455,6 +477,7 @@ export function ProductGrid({
                     );
                   }
                   const cellStyle = getCellStyle?.(cell);
+                  const subtext = getCellSubtext?.(cell);
                   return (
                     <td
                       key={size}
@@ -478,6 +501,19 @@ export function ProductGrid({
                         autoComplete="off"
                         disabled={readonly}
                       />
+                      {subtext != null && (
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            color: "#6b7280",
+                            textAlign: "center",
+                            marginTop: "2px",
+                            lineHeight: 1.2,
+                          }}
+                        >
+                          {subtext}
+                        </div>
+                      )}
                     </td>
                   );
                 })}
