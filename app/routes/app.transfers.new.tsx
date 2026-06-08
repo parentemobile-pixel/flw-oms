@@ -182,6 +182,81 @@ export default function NewTransfer() {
   const [isSearching, setIsSearching] = useState(false);
   const [pickerCollapsed, setPickerCollapsed] = useState(false);
 
+  // Read a prefill payload written by another page (currently the
+  // Replenishment report) and apply it once on mount. Payload shape
+  // matches the writer side at app.replenishment._index.tsx:
+  //   { ts, fromLocationId, toLocationId, rows: [{ ..., quantitySent }] }
+  // We clear the key immediately so a refresh doesn't re-apply, and
+  // we drop payloads older than 60s so a stale handoff doesn't surface
+  // after the user navigated elsewhere first.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const PREFILL_KEY = "flw-oms.transfer-prefill";
+    let raw: string | null = null;
+    try {
+      raw = window.localStorage.getItem(PREFILL_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    try {
+      window.localStorage.removeItem(PREFILL_KEY);
+    } catch {
+      /* ignore */
+    }
+    let payload:
+      | {
+          ts?: number;
+          fromLocationId?: string;
+          toLocationId?: string;
+          rows?: Array<{
+            variantId: string;
+            productId: string;
+            productTitle: string;
+            variantTitle: string;
+            sku: string | null;
+            selectedOptions: Array<{ name: string; value: string }>;
+            quantitySent: number;
+          }>;
+        }
+      | null = null;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!payload) return;
+    if (
+      typeof payload.ts === "number" &&
+      Date.now() - payload.ts > 60_000
+    ) {
+      return; // stale
+    }
+    if (payload.fromLocationId) setFromLocationId(payload.fromLocationId);
+    if (payload.toLocationId) setToLocationId(payload.toLocationId);
+    if (payload.rows && payload.rows.length > 0) {
+      setRows((prev) => {
+        const next = [...prev];
+        const seen = new Set(next.map((r) => r.variantId));
+        for (const r of payload!.rows!) {
+          if (seen.has(r.variantId)) continue;
+          next.push({
+            variantId: r.variantId,
+            productId: r.productId,
+            productTitle: r.productTitle,
+            variantTitle: r.variantTitle,
+            sku: r.sku,
+            selectedOptions: r.selectedOptions,
+            fromStock: 0,
+            quantitySent: r.quantitySent,
+          });
+        }
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Keep "To" valid relative to "From". If the user picks a From that
   // happens to be the location currently selected as To (common when
   // reversing a transfer — From defaults to the main store, you switch
@@ -320,7 +395,9 @@ export default function NewTransfer() {
     [rows, loadStockFor],
   );
 
-  // Reload stock when from-location changes
+  // Reload stock when from-location changes — also fires the first
+  // time rows arrive (covers the Replenishment prefill case where rows
+  // get seeded by the mount effect without the user touching anything).
   useEffect(() => {
     if (!fromLocationId || rows.length === 0) return;
     const fd = new FormData();
@@ -329,7 +406,7 @@ export default function NewTransfer() {
     fd.set("variantIds", JSON.stringify(rows.map((r) => r.variantId)));
     submit(fd, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fromLocationId]);
+  }, [fromLocationId, rows.length]);
 
   const cells: GridCell[] = useMemo(
     () =>
