@@ -29,7 +29,6 @@ export default function App() {
         <Link to="/app/purchase-orders">Purchase Orders</Link>
         <Link to="/app/adjust">Inventory Adjust</Link>
         <Link to="/app/transfers">Transfers</Link>
-        <Link to="/app/replenishment">Replenishment</Link>
         <Link to="/app/stock-counts">Stock Counts</Link>
         <Link to="/app/planning">Planning</Link>
         <Link to="/app/print-labels">Print Labels</Link>
