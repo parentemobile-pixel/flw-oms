@@ -53,6 +53,7 @@ export interface POSummary {
   createdAt: Date;
   shopifyLocationId: string | null;
   paidAt: Date | null;
+  printedAt: Date | null;
   // Aggregates (computed, not stored)
   totalUnits: number;
   totalReceived: number;
@@ -172,6 +173,7 @@ export async function getPurchaseOrderSummaries(
       createdAt: true,
       shopifyLocationId: true,
       paidAt: true,
+      printedAt: true,
     },
     orderBy: { createdAt: "desc" },
   });
@@ -338,6 +340,27 @@ export async function setPurchaseOrderPaid(
   return db.purchaseOrder.update({
     where: { id },
     data: { paidAt: paid ? new Date() : null },
+  });
+}
+
+/**
+ * Toggle the printed flag on a PO. Same pattern as `setPurchaseOrderPaid`
+ * — timestamp instead of boolean so we know WHEN it was marked printed.
+ * `printedAt !== null` is the "is printed" predicate.
+ */
+export async function setPurchaseOrderPrinted(
+  shop: string,
+  id: string,
+  printed: boolean,
+) {
+  const existing = await db.purchaseOrder.findFirst({
+    where: { shop, id },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("PO not found");
+  return db.purchaseOrder.update({
+    where: { id },
+    data: { printedAt: printed ? new Date() : null },
   });
 }
 

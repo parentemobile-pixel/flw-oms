@@ -21,6 +21,7 @@ import { authenticate } from "../shopify.server";
 import {
   getPurchaseOrderSummaries,
   setPurchaseOrderPaid,
+  setPurchaseOrderPrinted,
   type POSummary,
 } from "../services/purchase-orders/po-service.server";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
@@ -46,6 +47,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return json({ error: String(error) }, { status: 400 });
     }
   }
+  if (intent === "togglePrinted") {
+    const id = String(formData.get("id"));
+    const printed = formData.get("printed") === "1";
+    try {
+      await setPurchaseOrderPrinted(session.shop, id, printed);
+      return json({ ok: true as const });
+    } catch (error) {
+      return json({ error: String(error) }, { status: 400 });
+    }
+  }
   return json({});
 };
 
@@ -65,21 +76,23 @@ const SORT_COMPARATORS: Array<(a: POSummary, b: POSummary) => number> = [
   (a, b) => a.status.localeCompare(b.status),
   // 3: Paid (paid first when ascending)
   (a, b) => Number(!!b.paidAt) - Number(!!a.paidAt),
-  // 4: Units
+  // 4: Printed (printed first when ascending)
+  (a, b) => Number(!!b.printedAt) - Number(!!a.printedAt),
+  // 5: Units
   (a, b) => a.totalUnits - b.totalUnits,
-  // 5: Received (% so a 50/100 PO sorts above 5/5 — partial fulfillment urgency)
+  // 6: Received (% so a 50/100 PO sorts above 5/5 — partial fulfillment urgency)
   (a, b) => {
     const pa = a.totalUnits > 0 ? a.totalReceived / a.totalUnits : 0;
     const pb = b.totalUnits > 0 ? b.totalReceived / b.totalUnits : 0;
     return pa - pb;
   },
-  // 6: Total Cost
+  // 7: Total Cost
   (a, b) => a.totalCost - b.totalCost,
-  // 7: Ship By (nulls last when ascending)
+  // 8: Ship By (nulls last when ascending)
   (a, b) => dateAsc(a.shippingDate, b.shippingDate),
-  // 8: Expected
+  // 9: Expected
   (a, b) => dateAsc(a.expectedDate, b.expectedDate),
-  // 9: Created
+  // 10: Created
   (a, b) => dateAsc(a.createdAt, b.createdAt),
 ];
 
@@ -97,9 +110,11 @@ function dateAsc(
 export default function PurchaseOrdersList() {
   const { purchaseOrders } = useLoaderData<typeof loader>();
   const paidFetcher = useFetcher<typeof action>();
+  const printedFetcher = useFetcher<typeof action>();
   // Default sort: created date descending (matches the previous behavior
-  // when summaries came back orderBy createdAt desc).
-  const [sortIndex, setSortIndex] = useState<number>(9);
+  // when summaries came back orderBy createdAt desc). Created is column
+  // index 10 after the Printed checkbox column was inserted at index 4.
+  const [sortIndex, setSortIndex] = useState<number>(10);
   const [sortDir, setSortDir] = useState<"ascending" | "descending">(
     "descending",
   );
@@ -129,6 +144,17 @@ export default function PurchaseOrdersList() {
       paidFetcher.submit(fd, { method: "post" });
     },
     [paidFetcher],
+  );
+
+  const handleTogglePrinted = useCallback(
+    (id: string, currentlyPrinted: boolean) => {
+      const fd = new FormData();
+      fd.set("intent", "togglePrinted");
+      fd.set("id", id);
+      fd.set("printed", currentlyPrinted ? "0" : "1");
+      printedFetcher.submit(fd, { method: "post" });
+    },
+    [printedFetcher],
   );
 
   const resourceName = {
@@ -186,6 +212,16 @@ export default function PurchaseOrdersList() {
           />
         </div>
       </IndexTable.Cell>
+      <IndexTable.Cell>
+        <div onClick={(e) => e.stopPropagation()}>
+          <Checkbox
+            label={po.printedAt ? "Printed" : "Not printed"}
+            labelHidden
+            checked={!!po.printedAt}
+            onChange={() => handleTogglePrinted(po.id, !!po.printedAt)}
+          />
+        </div>
+      </IndexTable.Cell>
       <IndexTable.Cell>{po.totalUnits} units</IndexTable.Cell>
       <IndexTable.Cell>
         {po.totalReceived} / {po.totalUnits}
@@ -227,6 +263,7 @@ export default function PurchaseOrdersList() {
                   true, // Vendor
                   true, // Status
                   true, // Paid
+                  true, // Printed
                   true, // Units
                   true, // Received
                   true, // Total Cost
@@ -242,6 +279,7 @@ export default function PurchaseOrdersList() {
                   { title: "Vendor" },
                   { title: "Status" },
                   { title: "Paid" },
+                  { title: "Printed" },
                   { title: "Units" },
                   { title: "Received" },
                   { title: "Total Cost" },

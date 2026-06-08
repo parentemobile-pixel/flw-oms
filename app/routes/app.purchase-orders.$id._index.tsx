@@ -36,6 +36,7 @@ import {
   updatePurchaseOrderStatus,
   deletePurchaseOrder,
   setPurchaseOrderPaid,
+  setPurchaseOrderPrinted,
 } from "../services/purchase-orders/po-service.server";
 import {
   getLocations,
@@ -145,6 +146,12 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   if (intent === "togglePaid") {
     const paid = formData.get("paid") === "1";
     await setPurchaseOrderPaid(session.shop, params.id!, paid);
+    return json({ ok: true as const });
+  }
+
+  if (intent === "togglePrinted") {
+    const printed = formData.get("printed") === "1";
+    await setPurchaseOrderPrinted(session.shop, params.id!, printed);
     return json({ ok: true as const });
   }
 
@@ -468,6 +475,14 @@ export default function PurchaseOrderDetail() {
     paidFetcher.submit(fd, { method: "post" });
   }, [paidFetcher, po.paidAt]);
 
+  const printedFetcher = useFetcher<typeof action>();
+  const handleTogglePrinted = useCallback(() => {
+    const fd = new FormData();
+    fd.set("intent", "togglePrinted");
+    fd.set("printed", po.printedAt ? "0" : "1");
+    printedFetcher.submit(fd, { method: "post" });
+  }, [printedFetcher, po.printedAt]);
+
   // ── PDF / label downloads ────────────────────────────────────────────
   // All PDF downloads fetch inside the authenticated iframe and trigger a
   // blob download. A top-level navigation to the API endpoint (what we used
@@ -715,6 +730,7 @@ export default function PurchaseOrderDetail() {
             {PO_STATUS_LABELS[po.status] || po.status}
           </Badge>
           {po.paidAt && <Badge tone="success">Paid</Badge>}
+          {po.printedAt && <Badge tone="info">Printed</Badge>}
         </InlineStack>
       }
       primaryAction={primaryAction}
@@ -1012,6 +1028,21 @@ export default function PurchaseOrderDetail() {
                       checked={!!po.paidAt}
                       onChange={handleTogglePaid}
                       disabled={paidFetcher.state !== "idle"}
+                    />
+                  </BlockStack>
+                  <BlockStack gap="100">
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      Printed
+                    </Text>
+                    <Checkbox
+                      label={
+                        po.printedAt
+                          ? `Printed (${formatDate(po.printedAt)})`
+                          : "Mark as printed"
+                      }
+                      checked={!!po.printedAt}
+                      onChange={handleTogglePrinted}
+                      disabled={printedFetcher.state !== "idle"}
                     />
                   </BlockStack>
                 </InlineStack>

@@ -129,6 +129,7 @@ model PurchaseOrder {
   receiveToken      String    @default(cuid()) // used for scan-to-receive signed URL
   pdfGeneratedAt    DateTime?
   paidAt            DateTime? // null = unpaid; timestamp = when user marked it paid
+  printedAt         DateTime? // null = unprinted; timestamp = when user marked it printed
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
