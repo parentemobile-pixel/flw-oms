@@ -640,7 +640,7 @@ export default function NewTransfer() {
               loading={isBusy}
               disabled={!canCreate}
             >
-              Create draft transfer
+              Save as draft
             </Button>
           </InlineStack>
         </Layout.Section>

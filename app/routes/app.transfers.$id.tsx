@@ -304,7 +304,7 @@ export default function TransferDetail() {
                 ? "Inventory subtracted at source. Transfer is in transit."
                 : t.status === "received"
                   ? "All units received. Transfer complete."
-                  : "Saved."}
+                  : "Saved as draft. Click “Send” when ready to ship."}
             </Banner>
           </Layout.Section>
         )}

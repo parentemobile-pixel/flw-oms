@@ -270,7 +270,18 @@ export function ProductGrid({
           fontSize: "13px",
         }}
       >
-        <thead>
+        {/* Sticky header so size columns stay visible as the user
+            scrolls down a long replenishment / PO / transfer grid.
+            Background fill keeps the underlying rows from showing
+            through as they pass under it. */}
+        <thead
+          style={{
+            position: "sticky",
+            top: 0,
+            background: "#fff",
+            zIndex: 2,
+          }}
+        >
           <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
             <th style={{ padding: "8px", textAlign: "left", minWidth: "200px" }}>
               Product / Variant

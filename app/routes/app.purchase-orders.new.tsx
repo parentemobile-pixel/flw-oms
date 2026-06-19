@@ -39,7 +39,10 @@ import { authenticate } from "../shopify.server";
 import {
   getVendors,
   searchProductsByVendor,
+  setVariantBarcodes,
 } from "../services/shopify-api/products.server";
+import { getVariantsInventory } from "../services/shopify-api/inventory.server";
+import { generateBarcodeForVariant } from "../services/shopify-api/barcodes.server";
 import {
   createPurchaseOrder,
   getOnOrderQuantities,
@@ -172,6 +175,56 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             quantityOrdered: li.quantityOrdered,
           })),
       });
+
+      // Backfill barcodes for any selected variant that doesn't have
+      // one yet in Shopify. Refresh from live inventory (not the
+      // picker's stale snapshot) so we don't double-write to variants
+      // that picked up a barcode after the picker loaded. Failures
+      // here log + continue — never block PO save.
+      try {
+        const variantIds = [
+          ...new Set(
+            lineItems
+              .filter((li) => li.quantityOrdered > 0)
+              .map((li) => li.shopifyVariantId),
+          ),
+        ];
+        if (variantIds.length > 0) {
+          const liveInv = await getVariantsInventory(admin, variantIds);
+          const productIdByVariant = new Map(
+            lineItems.map((li) => [li.shopifyVariantId, li.shopifyProductId]),
+          );
+          const updates: Array<{
+            productId: string;
+            variantId: string;
+            barcode: string;
+          }> = [];
+          for (const variantId of variantIds) {
+            const inv = liveInv.get(variantId);
+            if (inv && inv.barcode) continue;
+            const productId = productIdByVariant.get(variantId);
+            if (!productId) continue;
+            updates.push({
+              productId,
+              variantId,
+              barcode: generateBarcodeForVariant(variantId),
+            });
+          }
+          if (updates.length > 0) {
+            const result = await setVariantBarcodes(admin, updates);
+            if (result.failures.length > 0) {
+              console.warn(
+                `PO create: ${result.updated} barcode(s) backfilled, ${result.failures.length} failed:`,
+                result.failures,
+              );
+            }
+          }
+        }
+      } catch (error) {
+        // Non-fatal — labels endpoint pulls live values at print time
+        // so a missed backfill just means the user can re-run later.
+        console.error("PO create: barcode backfill failed (non-fatal):", error);
+      }
 
       return redirect(`/app/purchase-orders/${po.id}`);
     } catch (error) {

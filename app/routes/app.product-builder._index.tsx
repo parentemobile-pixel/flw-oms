@@ -191,6 +191,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const productNumericId = productId
       ? String(productId).replace("gid://shopify/Product/", "")
       : null;
+    // Variant gids of every freshly-created variant — the success banner's
+    // "Print labels" action posts these to /api/labels/adhoc so the user
+    // can print directly without re-finding the product.
+    const variantIds: string[] = (result.product?.variants?.edges ?? [])
+      .map((e: { node: { id: string } }) => e.node.id)
+      .filter((id: string) => typeof id === "string" && id);
 
     // Publish to selected sales channels. Failures here are non-fatal
     // (the product DID get created), but they're surfaced as a warning
@@ -222,6 +228,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       variantCount,
       productId,
       productNumericId,
+      variantIds,
       title,
       intent,
       publicationWarning,
@@ -386,7 +393,49 @@ export default function ProductBuilder() {
     title: string;
     productNumericId: string;
     variantCount: number;
+    variantIds: string[];
   } | null>(null);
+  // Print-labels download state for the success banner action — single
+  // in-flight, so the button shows a Generating… label while we wait.
+  const [isPrintingLabels, setIsPrintingLabels] = useState(false);
+  const handlePrintLabelsForNewProduct = useCallback(
+    async (variantIds: string[]) => {
+      if (variantIds.length === 0 || isPrintingLabels) return;
+      setIsPrintingLabels(true);
+      try {
+        const fd = new FormData();
+        fd.set("variantIds", JSON.stringify(variantIds));
+        fd.set("quantity", "1");
+        const response = await fetch("/api/labels/adhoc", {
+          method: "POST",
+          body: fd,
+        });
+        if (!response.ok) {
+          throw new Error(`Labels endpoint returned ${response.status}`);
+        }
+        const blob = await response.blob();
+        if (blob.size === 0) throw new Error("Generated PDF was empty.");
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `labels-new-product.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) {
+        console.error("Print labels failed:", error);
+        window.alert(
+          `Couldn't generate labels: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      } finally {
+        setIsPrintingLabels(false);
+      }
+    },
+    [isPrintingLabels],
+  );
 
   // Reset every form field back to its pristine state. Used by both
   // "Save & Create Another" (auto-invoked after a successful save) and
@@ -428,6 +477,9 @@ export default function ProductBuilder() {
         title: String(actionData.title),
         productNumericId: String(actionData.productNumericId || ""),
         variantCount: Number(actionData.variantCount),
+        variantIds: Array.isArray(actionData.variantIds)
+          ? (actionData.variantIds as string[])
+          : [],
       });
       resetForm();
     }
@@ -882,6 +934,24 @@ export default function ProductBuilder() {
                   ? {
                       content: "View product",
                       url: `shopify:admin/products/${successBanner.productNumericId}`,
+                    }
+                  : undefined
+              }
+              // Secondary action — print labels for every newly-created
+              // variant in one PDF (1 copy each). Skipped when the
+              // success payload didn't surface variant IDs (older
+              // back-compat paths).
+              secondaryAction={
+                successBanner.variantIds.length > 0
+                  ? {
+                      content: isPrintingLabels
+                        ? "Generating…"
+                        : `Print labels (${successBanner.variantIds.length})`,
+                      onAction: () =>
+                        handlePrintLabelsForNewProduct(
+                          successBanner.variantIds,
+                        ),
+                      loading: isPrintingLabels,
                     }
                   : undefined
               }
@@ -1603,6 +1673,28 @@ export default function ProductBuilder() {
                 <Text as="p" variant="bodySm" tone="subdued">
                   Select which channels this product will be published to.
                 </Text>
+                <InlineStack gap="200">
+                  {/* POS-only preset — picks just the POS publication.
+                      Falls back to clearing all selections if no POS
+                      publication exists on this shop. */}
+                  <Button
+                    size="slim"
+                    onClick={() => {
+                      const posId = findPosPublicationId(publications);
+                      setSelectedPubs(posId ? [posId] : []);
+                    }}
+                  >
+                    POS only
+                  </Button>
+                  {/* All-channels preset — picks every publication
+                      including Online Store, Shop, etc. */}
+                  <Button
+                    size="slim"
+                    onClick={() => setSelectedPubs(publications.map((p) => p.id))}
+                  >
+                    All channels
+                  </Button>
+                </InlineStack>
                 {publications.map((pub) => (
                   <Checkbox
                     key={pub.id}
@@ -1843,11 +1935,30 @@ export default function ProductBuilder() {
                   onAction: resetForm,
                 }}
               >
-                <p>
-                  Use &ldquo;View product&rdquo; to open the Shopify admin,
-                  or &ldquo;Create another&rdquo; to clear the form and
-                  start a new one.
-                </p>
+                <BlockStack gap="200">
+                  <p>
+                    Use &ldquo;View product&rdquo; to open the Shopify admin,
+                    or &ldquo;Create another&rdquo; to clear the form and
+                    start a new one.
+                  </p>
+                  {Array.isArray(actionData.variantIds) &&
+                    (actionData.variantIds as string[]).length > 0 && (
+                      <InlineStack gap="200">
+                        <Button
+                          onClick={() =>
+                            handlePrintLabelsForNewProduct(
+                              actionData.variantIds as string[],
+                            )
+                          }
+                          loading={isPrintingLabels}
+                        >
+                          {isPrintingLabels
+                            ? "Generating…"
+                            : `Print labels (${(actionData.variantIds as string[]).length})`}
+                        </Button>
+                      </InlineStack>
+                    )}
+                </BlockStack>
               </Banner>
             </Layout.Section>
           )}
