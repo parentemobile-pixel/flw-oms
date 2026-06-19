@@ -16,6 +16,7 @@ import {
 
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { LabelQuickPrint } from "../components/LabelQuickPrint";
 
 // Lazy-load the AIChat so the dashboard paints first. This materially
 // improves perceived load time — Home shows the "what needs attention" card,
@@ -340,10 +341,15 @@ export default function Index() {
               </Text>
               <InlineStack gap="200">
                 <Button url="/app/adjust">Adjust</Button>
-                <Button url="/app/print-labels">Print labels</Button>
+                <Button url="/app/print-labels">Print labels (full)</Button>
               </InlineStack>
             </BlockStack>
           </Card>
+        </Layout.Section>
+
+        {/* Quick label print — search → pick → print without leaving home. */}
+        <Layout.Section variant="oneHalf">
+          <LabelQuickPrint />
         </Layout.Section>
 
         {/* Recent adjustments (audit log) */}
