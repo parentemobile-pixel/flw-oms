@@ -6,9 +6,57 @@ import {
   type EntryContext,
 } from "@remix-run/node";
 import { isbot } from "isbot";
-import { addDocumentResponseHeaders } from "./shopify.server";
+import { addDocumentResponseHeaders, unauthenticated } from "./shopify.server";
+import db from "./db.server";
+import { buildInventoryValueSnapshot } from "./services/reports/inventory-value-snapshot.server";
 
 export const streamTimeout = 5000;
+
+// ─── Nightly inventory-value snapshot ──────────────────────────────────
+// Once per process, schedule a recurring tick that builds the day's
+// inventory-value snapshot for every installed shop. The tick fires
+// every 6 hours so we catch up on a missed day quickly; the snapshot
+// builder is idempotent on (shop, periodEnd) so re-runs the same day
+// don't duplicate. Stored on globalThis to survive HMR module reloads.
+const SNAPSHOT_TICK_MS = 6 * 60 * 60 * 1000;
+type CronGlobal = typeof globalThis & {
+  __flwInventoryValueCron?: NodeJS.Timeout;
+};
+const cronGlobal = globalThis as CronGlobal;
+if (!cronGlobal.__flwInventoryValueCron) {
+  const run = async () => {
+    try {
+      const sessions = await db.session.findMany({
+        select: { shop: true },
+        distinct: ["shop"],
+      });
+      for (const { shop } of sessions) {
+        // Skip if today's snapshot is already on disk.
+        const today = new Date();
+        today.setUTCHours(0, 0, 0, 0);
+        const existing = await db.inventoryValueSnapshot.findFirst({
+          where: { shop, periodEnd: { gte: today } },
+          select: { id: true },
+        });
+        if (existing) continue;
+        try {
+          const { admin } = await unauthenticated.admin(shop);
+          const result = await buildInventoryValueSnapshot(admin, shop);
+          console.log(
+            `[InventoryValueCron] ${shop}: wrote ${result.rowsWritten} rows across ${result.productCount} products`,
+          );
+        } catch (error) {
+          console.error(`[InventoryValueCron] ${shop} failed:`, error);
+        }
+      }
+    } catch (error) {
+      console.error("[InventoryValueCron] tick failed:", error);
+    }
+  };
+  // Fire once shortly after boot, then on the interval.
+  setTimeout(run, 60_000);
+  cronGlobal.__flwInventoryValueCron = setInterval(run, SNAPSHOT_TICK_MS);
+}
 
 export default async function handleRequest(
   request: Request,

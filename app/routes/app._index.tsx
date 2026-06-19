@@ -342,6 +342,7 @@ export default function Index() {
               <InlineStack gap="200">
                 <Button url="/app/adjust">Adjust</Button>
                 <Button url="/app/print-labels">Print labels (full)</Button>
+                <Button url="/app/reports">Reports</Button>
               </InlineStack>
             </BlockStack>
           </Card>
