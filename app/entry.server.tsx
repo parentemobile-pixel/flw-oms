@@ -9,6 +9,7 @@ import { isbot } from "isbot";
 import { addDocumentResponseHeaders, unauthenticated } from "./shopify.server";
 import db from "./db.server";
 import { buildInventoryValueSnapshot } from "./services/reports/inventory-value-snapshot.server";
+import { backfillStockyIfNeeded } from "./services/reports/stocky-backfill.server";
 
 export const streamTimeout = 5000;
 
@@ -31,11 +32,23 @@ if (!cronGlobal.__flwInventoryValueCron) {
         distinct: ["shop"],
       });
       for (const { shop } of sessions) {
-        // Skip if today's snapshot is already on disk.
+        // One-shot Stocky historical backfill (idempotent — checks for
+        // existing sentinel rows before writing).
+        try {
+          await backfillStockyIfNeeded(shop);
+        } catch (error) {
+          console.error(`[StockyBackfill] ${shop} failed:`, error);
+        }
+
+        // Skip if today's per-location snapshot is already on disk.
         const today = new Date();
         today.setUTCHours(0, 0, 0, 0);
         const existing = await db.inventoryValueSnapshot.findFirst({
-          where: { shop, periodEnd: { gte: today } },
+          where: {
+            shop,
+            periodEnd: { gte: today },
+            locationId: { not: "stocky-total" },
+          },
           select: { id: true },
         });
         if (existing) continue;
