@@ -124,6 +124,14 @@ interface ProductGridProps {
     productTitle: string;
     cells: GridCell[];
   }) => ReactNode;
+  /**
+   * Optional remove-row callback. When set, each row renders a small
+   * "×" button next to the product title; clicking it invokes this
+   * callback with every variantId in the row so the parent can drop
+   * them from its state in one shot. Used by Replenishment + Transfer
+   * new. Other callers leave it unset — back-compat.
+   */
+  onRemoveRow?: (variantIds: string[]) => void;
 }
 
 const SIZE_ORDER = [
@@ -186,6 +194,7 @@ export function ProductGrid({
   getCellSubtext,
   trailingLabel = "Row Total",
   renderRowTrailing,
+  onRemoveRow,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
@@ -375,6 +384,34 @@ export function ProductGrid({
               <tr style={{ borderBottom: "1px solid #f1f1f1" }}>
                 <td style={{ padding: "8px", fontWeight: 500 }}>
                   <InlineStack gap="100" blockAlign="center">
+                    {onRemoveRow && (
+                      // Drop every variantId in this row in one shot —
+                      // the parent owns the row state, we just tell it
+                      // which ids to forget.
+                      <button
+                        type="button"
+                        aria-label={`Remove ${row.productTitle}`}
+                        onClick={() =>
+                          onRemoveRow([
+                            ...Object.values(row.bySize).map(
+                              (c) => c.variantId,
+                            ),
+                            ...row.overflowCells.map((o) => o.cell.variantId),
+                          ])
+                        }
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: "0 4px",
+                          cursor: "pointer",
+                          color: "#9ca3af",
+                          fontSize: "16px",
+                          lineHeight: 1,
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
                     <Text as="span" variant="bodyMd">
                       {row.productTitle}
                     </Text>

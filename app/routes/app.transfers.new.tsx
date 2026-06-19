@@ -625,6 +625,14 @@ export default function NewTransfer() {
                     retail: false,
                     onOrder: false,
                   }}
+                  onRemoveRow={(variantIds) => {
+                    // Drop these variant ids from the working set so the
+                    // row disappears from the grid + the create payload.
+                    const drop = new Set(variantIds);
+                    setRows((prev) =>
+                      prev.filter((r) => !drop.has(r.variantId)),
+                    );
+                  }}
                 />
               </BlockStack>
             </Card>

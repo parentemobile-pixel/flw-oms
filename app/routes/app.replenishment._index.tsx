@@ -254,8 +254,20 @@ export default function Replenishment() {
   // min(sold, sourceAvailable) so the typical "send what they sold"
   // case takes one click.
   const [transferQty, setTransferQty] = useState<Record<string, number>>({});
+  // Variants the user has clicked "×" on; filtered out of the grid +
+  // transfer payload until a fresh report run resets the set.
+  const [removedVariantIds, setRemovedVariantIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
-  const reportRows = actionData?.report?.rows ?? [];
+  // Use the raw rows the action returned, then drop anything the user
+  // dismissed via the X. Summary still reflects the full report — the
+  // user removed those rows from the *send* decision, not the *report*.
+  const rawReportRows = actionData?.report?.rows ?? [];
+  const reportRows = useMemo(
+    () => rawReportRows.filter((r) => !removedVariantIds.has(r.variantId)),
+    [rawReportRows, removedVariantIds],
+  );
   const reportSummary = actionData?.report?.summary;
 
   // Stable key identifying which report is in view; we re-seed
@@ -284,6 +296,18 @@ export default function Replenishment() {
     // re-creates an empty array literal for actionData.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportKey]);
+
+  // Clear the row-removal set when a brand-new report arrives so
+  // dismissals from a prior run don't silently filter out variants
+  // the new run cares about. Key off the RAW row set so the effect
+  // doesn't fire when only `removedVariantIds` change.
+  const rawReportKey = useMemo(
+    () => rawReportRows.map((r) => r.variantId).join(","),
+    [rawReportRows],
+  );
+  useEffect(() => {
+    setRemovedVariantIds(new Set());
+  }, [rawReportKey]);
 
   const handleCellChange = useCallback((variantId: string, next: number) => {
     setTransferQty((prev) => ({ ...prev, [variantId]: Math.max(0, next) }));
@@ -432,6 +456,66 @@ export default function Replenishment() {
 
   const span = daysBetween(startDate, endDate);
   const spanLabel = span > 0 ? `${span} day${span !== 1 ? "s" : ""}` : "—";
+
+  // CSV / Print actions ───────────────────────────────────────────────
+  // Client-side blob download mirroring the Planning Categories pattern
+  // (app.planning.categories.tsx). One row per (product × colorway × size)
+  // with the proposed transfer qty, source-available, and computed note.
+  const csvEscape = (v: unknown): string => {
+    const s = v == null ? "" : String(v);
+    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const handleExportCsv = useCallback(() => {
+    if (reportRows.length === 0) return;
+    const header = [
+      "Product",
+      "Colorway",
+      "Size",
+      "SKU",
+      "Sold",
+      "Source available",
+      "Proposed transfer qty",
+    ];
+    const rows = reportRows.map((r) => {
+      const sizeOpt = r.selectedOptions.find(
+        (o) => o.name.toLowerCase() === "size",
+      );
+      const nonSize = r.selectedOptions
+        .filter((o) => o.name.toLowerCase() !== "size")
+        .map((o) => o.value)
+        .join(" / ");
+      return [
+        r.productTitle,
+        nonSize,
+        sizeOpt?.value ?? r.variantTitle,
+        r.sku ?? "",
+        r.sold,
+        r.sourceAvailable,
+        transferQty[r.variantId] ?? 0,
+      ];
+    });
+    const csv = [header, ...rows]
+      .map((row) => row.map(csvEscape).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    // Filename includes the destination + date range so multiple
+    // exports don't clobber each other in the downloads folder.
+    a.download = `replenishment-${startDate}-to-${endDate}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [reportRows, transferQty, startDate, endDate]);
+  const handlePrint = useCallback(() => {
+    // Browser print dialog renders the grid as-is. The user can pick
+    // "Save as PDF" from there. Keeps us off building a server-side
+    // PDF for v1.
+    if (typeof window !== "undefined") window.print();
+  }, []);
 
   return (
     <Page
@@ -595,6 +679,17 @@ export default function Replenishment() {
                   getCellSubtext={getCellSubtext}
                   trailingLabel="Note"
                   renderRowTrailing={renderRowTrailing}
+                  onRemoveRow={(variantIds) => {
+                    // Drop the variant ids from the working set so the
+                    // row vanishes immediately and won't be considered
+                    // when "Create transfer" stashes the prefill.
+                    const drop = new Set(variantIds);
+                    setRemovedVariantIds((prev) => {
+                      const next = new Set(prev);
+                      for (const id of drop) next.add(id);
+                      return next;
+                    });
+                  }}
                 />
               </div>
             </Card>
@@ -620,10 +715,12 @@ export default function Replenishment() {
             </Layout.Section>
           )}
 
-        {/* Create transfer */}
+        {/* Create transfer + export */}
         {reportRows.length > 0 && (
           <Layout.Section>
             <InlineStack align="end" gap="200">
+              <Button onClick={handlePrint}>Print</Button>
+              <Button onClick={handleExportCsv}>Export CSV</Button>
               <Button
                 variant="primary"
                 onClick={handleCreateTransfer}
