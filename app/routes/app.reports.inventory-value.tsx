@@ -36,8 +36,47 @@ import { buildInventoryValueSnapshot } from "../services/reports/inventory-value
 
 const DEFAULT_EXCLUDED_VENDORS = ["Colby Davis"];
 
+// Sentinel locationId for Stocky-imported "total inventory" rows.
+// Stocky's historical_stock_on_hand report isn't broken out by location,
+// so we file these under a single synthetic id and surface them in the
+// chart only when no specific-location filter is active.
+const STOCKY_TOTAL_LOCATION_ID = "stocky-total";
+const STOCKY_TOTAL_LABEL = "All locations (Stocky historical)";
+
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+function endOfDayUtc(yyyyMmDd: string): Date {
+  const out = new Date(`${yyyyMmDd}T00:00:00Z`);
+  out.setUTCHours(23, 59, 59, 999);
+  return out;
+}
+
+// Stocky CSVs come as MM/DD/YYYY. Convert to ISO so DB writes are clean.
+function parseStockyDate(raw: string): string | null {
+  const m = raw.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const [, mm, dd, yyyy] = m;
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+function parseStockyCsv(text: string): Map<string, number> {
+  const out = new Map<string, number>();
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    // Skip the header row (Stocky format: "Date,Total"). Tolerant of
+    // either uppercase or lowercase.
+    if (i === 0 && /^date\s*,\s*total/i.test(line)) continue;
+    const [dateRaw, valueRaw] = line.split(",");
+    const date = parseStockyDate(dateRaw ?? "");
+    const value = parseFloat((valueRaw ?? "").trim());
+    if (!date || !Number.isFinite(value)) continue;
+    out.set(date, value);
+  }
+  return out;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -62,6 +101,94 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     } catch (error) {
       return json({
         error: `Rebuild failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
+  }
+
+  if (intent === "importStocky") {
+    try {
+      const costCsv = String(formData.get("costCsv") ?? "");
+      const retailCsv = String(formData.get("retailCsv") ?? "");
+      const excludeDatesRaw = String(formData.get("excludeDates") ?? "");
+      const excludeSet = new Set(
+        excludeDatesRaw
+          .split(/[\s,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => parseStockyDate(s) ?? s),
+      );
+
+      const costMap = parseStockyCsv(costCsv);
+      const retailMap = parseStockyCsv(retailCsv);
+      if (costMap.size === 0 && retailMap.size === 0) {
+        return json({ error: "Couldn't parse either CSV — check the file format." });
+      }
+
+      // Union of dates across both files. Either column may be missing
+      // on a given date (rare, but tolerate it gracefully).
+      const allDates = new Set<string>([...costMap.keys(), ...retailMap.keys()]);
+      let imported = 0;
+      let skippedExisting = 0;
+      let skippedExcluded = 0;
+      const writes: Array<{
+        shop: string;
+        locationId: string;
+        vendor: string | null;
+        periodEnd: Date;
+        totalUnits: number;
+        totalCostValue: number;
+        totalRetailValue: number;
+      }> = [];
+
+      for (const date of allDates) {
+        if (excludeSet.has(date)) {
+          skippedExcluded++;
+          continue;
+        }
+        const periodEnd = endOfDayUtc(date);
+        // Skip if any snapshot already exists for this date (the cron
+        // owns dates from the cutover forward).
+        const existing = await db.inventoryValueSnapshot.findFirst({
+          where: {
+            shop: session.shop,
+            periodEnd,
+            locationId: STOCKY_TOTAL_LOCATION_ID,
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          skippedExisting++;
+          continue;
+        }
+        writes.push({
+          shop: session.shop,
+          locationId: STOCKY_TOTAL_LOCATION_ID,
+          vendor: null,
+          periodEnd,
+          totalUnits: 0,
+          totalCostValue: costMap.get(date) ?? 0,
+          totalRetailValue: retailMap.get(date) ?? 0,
+        });
+        imported++;
+      }
+
+      if (writes.length > 0) {
+        await db.inventoryValueSnapshot.createMany({ data: writes });
+      }
+
+      return json({
+        stockyImport: {
+          imported,
+          skippedExisting,
+          skippedExcluded,
+          totalRowsInFiles: allDates.size,
+        },
+      });
+    } catch (error) {
+      return json({
+        error: `Stocky import failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       });
@@ -122,6 +249,12 @@ interface ActionPayload {
   snapshots?: SnapshotRow[];
   rebuiltAt?: string;
   result?: { rowsWritten: number; productCount: number };
+  stockyImport?: {
+    imported: number;
+    skippedExisting: number;
+    skippedExcluded: number;
+    totalRowsInFiles: number;
+  };
   error?: string;
 }
 
@@ -140,6 +273,33 @@ export default function InventoryValueReport() {
   const [selectedVendors, setSelectedVendors] = useState<string[]>([]);
   const [excludeDefault, setExcludeDefault] = useState(true);
   const [vendorQuery, setVendorQuery] = useState("");
+  const [stockyCostCsv, setStockyCostCsv] = useState("");
+  const [stockyRetailCsv, setStockyRetailCsv] = useState("");
+  const [stockyCostFileName, setStockyCostFileName] = useState("");
+  const [stockyRetailFileName, setStockyRetailFileName] = useState("");
+  const [stockyExcludeDates, setStockyExcludeDates] = useState("2025-06-22");
+
+  const readFileAsText = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(file);
+    });
+  }, []);
+
+  const handleImportStocky = useCallback(() => {
+    if (!stockyCostCsv && !stockyRetailCsv) {
+      window.alert("Pick at least one CSV first.");
+      return;
+    }
+    const fd = new FormData();
+    fd.set("intent", "importStocky");
+    fd.set("costCsv", stockyCostCsv);
+    fd.set("retailCsv", stockyRetailCsv);
+    fd.set("excludeDates", stockyExcludeDates);
+    submit(fd, { method: "post" });
+  }, [stockyCostCsv, stockyRetailCsv, stockyExcludeDates, submit]);
 
   const handleQuery = useCallback(() => {
     const fd = new FormData();
@@ -173,7 +333,10 @@ export default function InventoryValueReport() {
   }, []);
 
   const locationName = useCallback(
-    (id: string) => locations.find((l) => l.id === id)?.name ?? id,
+    (id: string) => {
+      if (id === STOCKY_TOTAL_LOCATION_ID) return STOCKY_TOTAL_LABEL;
+      return locations.find((l) => l.id === id)?.name ?? id;
+    },
     [locations],
   );
 
@@ -181,28 +344,51 @@ export default function InventoryValueReport() {
 
   // Roll up the time series — sum across all returned snapshots per
   // date so the chart shows total cost-value and retail-value per day.
+  // Two-pass dedup: cron rollups win on any date where both cron and
+  // Stocky-imported rows exist, since the cron reflects real-time
+  // per-location stock and Stocky's total inventory is a coarser
+  // approximation of the same number.
   const series = useMemo(() => {
     const byDate = new Map<
       string,
-      { cost: number; retail: number; units: number }
+      { cost: number; retail: number; units: number; source: "cron" | "stocky" }
     >();
+    // Pass 1: cron-source rollup rows.
     for (const s of snapshots) {
-      const date = s.periodEnd.slice(0, 10);
-      // Filter out per-vendor rows when no vendor filter is set — the
-      // location-rollup rows (vendor=null) already cover the total.
       const isRollup = s.vendor == null;
       if (selectedVendors.length === 0 && !isRollup) continue;
-      // When a vendor filter is set, drop the rollup rows and aggregate
-      // the per-vendor rows for the selected vendors only.
       if (selectedVendors.length > 0 && isRollup) continue;
-      const entry = byDate.get(date) ?? { cost: 0, retail: 0, units: 0 };
+      if (s.locationId === STOCKY_TOTAL_LOCATION_ID) continue;
+      const date = s.periodEnd.slice(0, 10);
+      const entry = byDate.get(date) ?? {
+        cost: 0,
+        retail: 0,
+        units: 0,
+        source: "cron" as const,
+      };
       entry.cost += s.totalCostValue;
       entry.retail += s.totalRetailValue;
       entry.units += s.totalUnits;
       byDate.set(date, entry);
     }
+    // Pass 2: Stocky-source rows fill dates that don't already have
+    // cron coverage. Skipped entirely when a vendor filter is on —
+    // Stocky's historical_stock_on_hand has no vendor breakdown.
+    if (selectedVendors.length === 0) {
+      for (const s of snapshots) {
+        if (s.locationId !== STOCKY_TOTAL_LOCATION_ID) continue;
+        const date = s.periodEnd.slice(0, 10);
+        if (byDate.has(date)) continue;
+        byDate.set(date, {
+          cost: s.totalCostValue,
+          retail: s.totalRetailValue,
+          units: s.totalUnits,
+          source: "stocky",
+        });
+      }
+    }
     return Array.from(byDate.entries())
-      .map(([date, v]) => ({ date, ...v }))
+      .map(([date, v]) => ({ date, cost: v.cost, retail: v.retail, units: v.units }))
       .sort((a, b) => a.date.localeCompare(b.date));
   }, [snapshots, selectedVendors]);
 
@@ -278,6 +464,20 @@ export default function InventoryValueReport() {
             <Banner tone="success">
               Rebuilt today&rsquo;s snapshot: {actionData.result.rowsWritten}{" "}
               rows across {actionData.result.productCount} products.
+            </Banner>
+          </Layout.Section>
+        )}
+        {actionData?.stockyImport && (
+          <Layout.Section>
+            <Banner tone="success" title="Stocky import complete">
+              <Text as="p" variant="bodyMd">
+                Imported <strong>{actionData.stockyImport.imported}</strong>{" "}
+                days. Skipped{" "}
+                <strong>{actionData.stockyImport.skippedExisting}</strong>{" "}
+                already-imported and{" "}
+                <strong>{actionData.stockyImport.skippedExcluded}</strong>{" "}
+                excluded.
+              </Text>
             </Banner>
           </Layout.Section>
         )}
@@ -445,6 +645,88 @@ export default function InventoryValueReport() {
                 </Button>
                 <Button variant="primary" onClick={handleQuery} loading={isBusy}>
                   Run query
+                </Button>
+              </InlineStack>
+            </BlockStack>
+          </Card>
+        </Layout.Section>
+
+        {/* Stocky import — one-shot historical backfill from the
+            historical_stock_on_hand CSVs. Stocky shuts down Aug 31, 2026
+            so this is a finite window. Stored under a sentinel
+            locationId so dates from before our nightly cron started are
+            visible alongside ongoing snapshots. */}
+        <Layout.Section>
+          <Card>
+            <BlockStack gap="300">
+              <Text as="h2" variant="headingMd">
+                Import Stocky historical CSV
+              </Text>
+              <Text as="p" tone="subdued">
+                Backfills days before the nightly snapshot started.
+                Stocky&rsquo;s totals aren&rsquo;t broken out by location
+                — imported rows are filed under &ldquo;{STOCKY_TOTAL_LABEL}
+                &rdquo;.
+              </Text>
+              <InlineStack gap="400" wrap blockAlign="end">
+                <BlockStack gap="100">
+                  <Text as="span" variant="bodySm">
+                    Cost CSV
+                  </Text>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setStockyCostFileName(file.name);
+                      setStockyCostCsv(await readFileAsText(file));
+                    }}
+                  />
+                  {stockyCostFileName && (
+                    <Text as="span" tone="subdued" variant="bodySm">
+                      {stockyCostFileName}
+                    </Text>
+                  )}
+                </BlockStack>
+                <BlockStack gap="100">
+                  <Text as="span" variant="bodySm">
+                    Retail CSV
+                  </Text>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      setStockyRetailFileName(file.name);
+                      setStockyRetailCsv(await readFileAsText(file));
+                    }}
+                  />
+                  {stockyRetailFileName && (
+                    <Text as="span" tone="subdued" variant="bodySm">
+                      {stockyRetailFileName}
+                    </Text>
+                  )}
+                </BlockStack>
+              </InlineStack>
+              <div style={{ maxWidth: "320px" }}>
+                <TextField
+                  label="Exclude dates"
+                  value={stockyExcludeDates}
+                  onChange={setStockyExcludeDates}
+                  helpText="Comma-separated. Accepts YYYY-MM-DD or MM/DD/YYYY. Prefilled with the Herreshoff outlier."
+                  autoComplete="off"
+                />
+              </div>
+              <InlineStack align="end">
+                <Button
+                  variant="primary"
+                  onClick={handleImportStocky}
+                  loading={isBusy}
+                  disabled={!stockyCostCsv && !stockyRetailCsv}
+                >
+                  Import
                 </Button>
               </InlineStack>
             </BlockStack>
