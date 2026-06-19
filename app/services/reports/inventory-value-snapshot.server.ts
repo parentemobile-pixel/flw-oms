@@ -1,5 +1,6 @@
 import type { AdminApiContext } from "@shopify/shopify-app-remix/server";
 import db from "../../db.server";
+import { getVariantsInventory } from "../shopify-api/inventory.server";
 
 /**
  * Builds one InventoryValueSnapshot row per (location, vendor) plus
@@ -8,6 +9,12 @@ import db from "../../db.server";
  *
  * Idempotent on (shop, locationId, vendor, periodEnd) — re-running the
  * same day overwrites the day's row rather than duplicating.
+ *
+ * Two-pass design: a lean products query (no nested inventoryLevels)
+ * collects per-variant cost + retail + vendor, then the shared
+ * `getVariantsInventory` helper fetches per-location available qty in
+ * batches of 50. Pulling inventoryLevels inline blows past Shopify's
+ * 1000-point single-query cost limit on shops with deep variant counts.
  */
 const SNAPSHOT_PRODUCTS_QUERY = `#graphql
   query InventoryValueProducts($first: Int!, $after: String) {
@@ -24,17 +31,6 @@ const SNAPSHOT_PRODUCTS_QUERY = `#graphql
                 price
                 inventoryItem {
                   unitCost { amount }
-                  inventoryLevels(first: 20) {
-                    edges {
-                      node {
-                        location { id }
-                        quantities(names: ["available"]) {
-                          name
-                          quantity
-                        }
-                      }
-                    }
-                  }
                 }
               }
             }
@@ -54,17 +50,7 @@ interface RawProduct {
       node: {
         id: string;
         price: string | null;
-        inventoryItem: {
-          unitCost: { amount: string } | null;
-          inventoryLevels: {
-            edges: Array<{
-              node: {
-                location: { id: string };
-                quantities: Array<{ name: string; quantity: number }>;
-              };
-            }>;
-          };
-        } | null;
+        inventoryItem: { unitCost: { amount: string } | null } | null;
       };
     }>;
   };
@@ -89,19 +75,19 @@ export interface BuildInventoryValueResult {
   productCount: number;
 }
 
-/**
- * Walk the entire product catalog page-by-page and write the day's
- * inventory-value snapshot rows. Safe to call from a cron tick or a
- * "rebuild today's snapshot" button.
- */
 export async function buildInventoryValueSnapshot(
   admin: AdminApiContext,
   shop: string,
 ): Promise<BuildInventoryValueResult> {
   const periodEnd = endOfDayUtc(new Date());
-  const buckets = new Map<string, { vendor: string | null; locationId: string; metrics: Bucket }>();
-  const rollupByLocation = new Map<string, Bucket>();
 
+  // Pass 1 — walk every product, capture (variantId → cost/retail/vendor).
+  interface VariantMeta {
+    productVendor: string | null;
+    cost: number;
+    retail: number;
+  }
+  const variantMeta = new Map<string, VariantMeta>();
   let after: string | null = null;
   let hasNext = true;
   let productCount = 0;
@@ -127,47 +113,57 @@ export async function buildInventoryValueSnapshot(
       const vendor = product.vendor || null;
       for (const vEdge of product.variants.edges) {
         const variant = vEdge.node;
-        if (!variant.inventoryItem) continue;
-        const cost = parseFloat(variant.inventoryItem.unitCost?.amount ?? "0") || 0;
+        const cost = parseFloat(variant.inventoryItem?.unitCost?.amount ?? "0") || 0;
         const retail = parseFloat(variant.price ?? "0") || 0;
-        for (const lEdge of variant.inventoryItem.inventoryLevels.edges) {
-          const level = lEdge.node;
-          const locationId = level.location.id;
-          const avail =
-            level.quantities.find((q) => q.name === "available")?.quantity ?? 0;
-          if (avail === 0) continue;
-          // Per-vendor bucket
-          const vendorKey = bucketKey(locationId, vendor);
-          const vendorBucket =
-            buckets.get(vendorKey)?.metrics ?? {
-              totalUnits: 0,
-              totalCostValue: 0,
-              totalRetailValue: 0,
-            };
-          vendorBucket.totalUnits += avail;
-          vendorBucket.totalCostValue += avail * cost;
-          vendorBucket.totalRetailValue += avail * retail;
-          buckets.set(vendorKey, {
-            vendor,
-            locationId,
-            metrics: vendorBucket,
-          });
-          // Location rollup (vendor = null)
-          const rollup =
-            rollupByLocation.get(locationId) ?? {
-              totalUnits: 0,
-              totalCostValue: 0,
-              totalRetailValue: 0,
-            };
-          rollup.totalUnits += avail;
-          rollup.totalCostValue += avail * cost;
-          rollup.totalRetailValue += avail * retail;
-          rollupByLocation.set(locationId, rollup);
-        }
+        variantMeta.set(variant.id, { productVendor: vendor, cost, retail });
       }
     }
     hasNext = page.pageInfo.hasNextPage;
     after = page.pageInfo.endCursor;
+  }
+
+  // Pass 2 — fetch per-location levels in 50-id batches. Aggregate as
+  // we go to avoid holding the full level set in memory.
+  const buckets = new Map<
+    string,
+    { vendor: string | null; locationId: string; metrics: Bucket }
+  >();
+  const rollupByLocation = new Map<string, Bucket>();
+
+  const variantIds = Array.from(variantMeta.keys());
+  const invMap = await getVariantsInventory(admin, variantIds);
+  for (const [variantId, inv] of invMap.entries()) {
+    const meta = variantMeta.get(variantId);
+    if (!meta) continue;
+    for (const level of inv.levels) {
+      const avail = level.quantities.available ?? 0;
+      if (avail === 0) continue;
+      const vendorKey = bucketKey(level.locationId, meta.productVendor);
+      const vendorBucket =
+        buckets.get(vendorKey)?.metrics ?? {
+          totalUnits: 0,
+          totalCostValue: 0,
+          totalRetailValue: 0,
+        };
+      vendorBucket.totalUnits += avail;
+      vendorBucket.totalCostValue += avail * meta.cost;
+      vendorBucket.totalRetailValue += avail * meta.retail;
+      buckets.set(vendorKey, {
+        vendor: meta.productVendor,
+        locationId: level.locationId,
+        metrics: vendorBucket,
+      });
+      const rollup =
+        rollupByLocation.get(level.locationId) ?? {
+          totalUnits: 0,
+          totalCostValue: 0,
+          totalRetailValue: 0,
+        };
+      rollup.totalUnits += avail;
+      rollup.totalCostValue += avail * meta.cost;
+      rollup.totalRetailValue += avail * meta.retail;
+      rollupByLocation.set(level.locationId, rollup);
+    }
   }
 
   // Idempotent write: delete the day's rows for this shop first, then
@@ -203,9 +199,9 @@ export async function buildInventoryValueSnapshot(
       ...metrics,
     });
   }
-  // De-dup vendor=null rows (per-vendor null + rollup null) — keep the
-  // larger (the rollup). A product with a null vendor would otherwise
-  // collide with the rollup on the unique key.
+  // De-dup: a product with a null vendor would collide on the unique
+  // key with the rollup row. Keep whichever has more units (the rollup,
+  // by construction — it sums across all vendors).
   const byKey = new Map<string, (typeof rows)[number]>();
   for (const r of rows) {
     const k = `${r.locationId}::${r.vendor ?? ""}`;
