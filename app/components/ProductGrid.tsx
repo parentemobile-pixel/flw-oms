@@ -132,6 +132,18 @@ interface ProductGridProps {
    * new. Other callers leave it unset — back-compat.
    */
   onRemoveRow?: (variantIds: string[]) => void;
+  /**
+   * Maps `${productId}::${nonSizeLabel}::${SIZE_UPPER}` → variantId for
+   * variants that EXIST on the product but aren't currently selected
+   * (no GridCell for them). When set together with `onAddCell`, empty
+   * size cells whose key matches in this map render as a clickable "+"
+   * affordance; clicking calls `onAddCell` so the parent can add it to
+   * the working set. Replenishment + Transfer new use this; truly-
+   * absent sizes (variant doesn't exist) still render as "—". Other
+   * callers leave both unset — fully back-compat.
+   */
+  availableVariantBySize?: Map<string, string>;
+  onAddCell?: (variantId: string) => void;
 }
 
 const SIZE_ORDER = [
@@ -195,6 +207,8 @@ export function ProductGrid({
   trailingLabel = "Row Total",
   renderRowTrailing,
   onRemoveRow,
+  availableVariantBySize,
+  onAddCell,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
@@ -510,6 +524,43 @@ export function ProductGrid({
                 {sizes.map((size) => {
                   const cell = row.bySize[size];
                   if (!cell) {
+                    const availKey = availableVariantBySize
+                      ? `${row.productId}::${row.nonSizeLabel}::${size.toUpperCase()}`
+                      : null;
+                    const availableId = availKey
+                      ? availableVariantBySize!.get(availKey)
+                      : undefined;
+                    if (availableId && onAddCell && !readonly) {
+                      return (
+                        <td
+                          key={size}
+                          style={{
+                            padding: "4px",
+                            textAlign: "center",
+                            background: "#fafafa",
+                          }}
+                        >
+                          <button
+                            type="button"
+                            aria-label={`Add ${row.productTitle} ${row.nonSizeLabel} ${size}`}
+                            onClick={() => onAddCell(availableId)}
+                            style={{
+                              background: "none",
+                              border: "1px dashed #c4cdd5",
+                              borderRadius: "4px",
+                              cursor: "pointer",
+                              color: "#5c6ac4",
+                              fontSize: "16px",
+                              lineHeight: 1,
+                              padding: "6px 10px",
+                              width: "100%",
+                            }}
+                          >
+                            +
+                          </button>
+                        </td>
+                      );
+                    }
                     return (
                       <td
                         key={size}

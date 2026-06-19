@@ -154,6 +154,17 @@ const LOCATION_ORDERS_QUERY = `#graphql
               }
             }
           }
+          fulfillments {
+            location { id }
+            fulfillmentLineItems(first: 100) {
+              edges {
+                node {
+                  quantity
+                  lineItem { id }
+                }
+              }
+            }
+          }
           refunds {
             refundLineItems(first: 100) {
               edges {
@@ -185,6 +196,17 @@ interface RawOrderNode {
       };
     }>;
   };
+  fulfillments: Array<{
+    location: { id: string } | null;
+    fulfillmentLineItems: {
+      edges: Array<{
+        node: {
+          quantity: number;
+          lineItem: { id: string } | null;
+        };
+      }>;
+    };
+  }>;
   refunds: Array<{
     refundLineItems: {
       edges: Array<{
@@ -282,6 +304,24 @@ export async function fetchNetSalesAtLocation(
           productId: li.product?.id ?? "",
           net: li.quantity,
         });
+      }
+      // Ship-to-customer filter: tally fulfillments per line item by
+      // location. Any quantity fulfilled away from the retail register
+      // (i.e. fulfilled at a different location, typically the online
+      // warehouse) is shipped, not walked-out — subtract it from the
+      // line item's net so it doesn't pollute the in-store sales figure
+      // used by Replenishment. Orders with no fulfillments at all stay
+      // as-is (cash receipt-only POS sales).
+      for (const fulfillment of order.fulfillments ?? []) {
+        const fulfilledAt = fulfillment.location?.id ?? null;
+        if (fulfilledAt && fulfilledAt === locationGid) continue;
+        for (const fEdge of fulfillment.fulfillmentLineItems?.edges ?? []) {
+          const fLine = fEdge.node;
+          if (!fLine.lineItem?.id) continue;
+          const entry = perLine.get(fLine.lineItem.id);
+          if (!entry) continue;
+          entry.net -= fLine.quantity;
+        }
       }
       for (const refund of order.refunds ?? []) {
         for (const rEdge of refund.refundLineItems?.edges ?? []) {

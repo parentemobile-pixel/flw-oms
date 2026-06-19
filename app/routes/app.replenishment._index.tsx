@@ -259,16 +259,53 @@ export default function Replenishment() {
   const [removedVariantIds, setRemovedVariantIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // Variants the user has promoted from "+" click — sister sizes of
+  // sold colorways that weren't part of the report. Treated as report
+  // rows with sold=0 so they show up in the grid and get included in
+  // the transfer payload.
+  const [addedPeerIds, setAddedPeerIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   // Use the raw rows the action returned, then drop anything the user
   // dismissed via the X. Summary still reflects the full report — the
   // user removed those rows from the *send* decision, not the *report*.
-  const rawReportRows = actionData?.report?.rows ?? [];
+  // Promoted peer variants (added via "+") get folded into the rows so
+  // they share the same downstream pipeline (grid, qty seed, transfer
+  // payload, CSV).
+  const reportApiRows = actionData?.report?.rows ?? [];
+  const peerVariants = actionData?.report?.peerVariants ?? [];
+  const rawReportRows = useMemo(() => {
+    if (addedPeerIds.size === 0) return reportApiRows;
+    const promoted = peerVariants.filter((p) => addedPeerIds.has(p.variantId));
+    return [...reportApiRows, ...promoted];
+  }, [reportApiRows, peerVariants, addedPeerIds]);
   const reportRows = useMemo(
     () => rawReportRows.filter((r) => !removedVariantIds.has(r.variantId)),
     [rawReportRows, removedVariantIds],
   );
   const reportSummary = actionData?.report?.summary;
+
+  // Build the (productId::nonSize::SIZE) → variantId map for un-promoted
+  // peer variants so ProductGrid can render clickable "+" cells.
+  const availableVariantBySize = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const peer of peerVariants) {
+      if (addedPeerIds.has(peer.variantId)) continue;
+      if (removedVariantIds.has(peer.variantId)) continue;
+      const sizeOpt = peer.selectedOptions.find(
+        (o) => o.name.toLowerCase() === "size",
+      );
+      const size = (sizeOpt?.value ?? "").toUpperCase();
+      if (!size) continue;
+      const nonSize = peer.selectedOptions
+        .filter((o) => o.name.toLowerCase() !== "size")
+        .map((o) => o.value)
+        .join(" / ");
+      m.set(`${peer.productId}::${nonSize}::${size}`, peer.variantId);
+    }
+    return m;
+  }, [peerVariants, addedPeerIds, removedVariantIds]);
 
   // Stable key identifying which report is in view; we re-seed
   // transferQty whenever it changes.
@@ -301,12 +338,15 @@ export default function Replenishment() {
   // dismissals from a prior run don't silently filter out variants
   // the new run cares about. Key off the RAW row set so the effect
   // doesn't fire when only `removedVariantIds` change.
+  // Key off the API-returned rows only — folding promoted peers into
+  // the key would make a peer promotion immediately clear itself.
   const rawReportKey = useMemo(
-    () => rawReportRows.map((r) => r.variantId).join(","),
-    [rawReportRows],
+    () => reportApiRows.map((r) => r.variantId).join(","),
+    [reportApiRows],
   );
   useEffect(() => {
     setRemovedVariantIds(new Set());
+    setAddedPeerIds(new Set());
   }, [rawReportKey]);
 
   const handleCellChange = useCallback((variantId: string, next: number) => {
@@ -687,6 +727,14 @@ export default function Replenishment() {
                     setRemovedVariantIds((prev) => {
                       const next = new Set(prev);
                       for (const id of drop) next.add(id);
+                      return next;
+                    });
+                  }}
+                  availableVariantBySize={availableVariantBySize}
+                  onAddCell={(variantId) => {
+                    setAddedPeerIds((prev) => {
+                      const next = new Set(prev);
+                      next.add(variantId);
                       return next;
                     });
                   }}

@@ -25,6 +25,13 @@ export interface ReplenishmentSummary {
 
 export interface ReplenishmentReport {
   rows: ReplenishmentRow[];
+  /**
+   * Variants of products that had at least one sale but weren't sold
+   * themselves. Used by the UI's click-empty-cell affordance so the user
+   * can add an unsold sister size to the working set without searching.
+   * Same shape as `rows` minus the `sold` count (always 0 here).
+   */
+  peerVariants: ReplenishmentRow[];
   summary: ReplenishmentSummary;
 }
 
@@ -39,6 +46,27 @@ const VARIANT_INFO_QUERY = `#graphql
         product {
           id
           title
+        }
+      }
+    }
+  }
+`;
+
+const PRODUCT_PEER_VARIANTS_QUERY = `#graphql
+  query ReplenishmentPeerVariants($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Product {
+        id
+        title
+        variants(first: 100) {
+          edges {
+            node {
+              id
+              title
+              sku
+              selectedOptions { name value }
+            }
+          }
         }
       }
     }
@@ -80,6 +108,7 @@ export async function buildReplenishmentReport(
   if (netSales.length === 0) {
     return {
       rows: [],
+      peerVariants: [],
       summary: {
         totalUnitsSold: 0,
         variantsSold: 0,
@@ -135,8 +164,76 @@ export async function buildReplenishmentReport(
     }
   }
 
-  // 3. Source-location available qty per variant.
-  const invMap = await getVariantsInventory(admin, variantIds);
+  // 2b. Pull every other variant of any product that had at least one
+  // sale. Powers the click-empty-cell affordance — the user can click a
+  // blank size on a sold colorway to add that sister variant to the
+  // working transfer set without searching.
+  const productIds = Array.from(
+    new Set(
+      Array.from(variantInfo.values())
+        .map((v) => v.productId)
+        .filter((id) => id),
+    ),
+  );
+  const peerInfo = new Map<
+    string,
+    {
+      productId: string;
+      productTitle: string;
+      title: string;
+      sku: string | null;
+      selectedOptions: Array<{ name: string; value: string }>;
+    }
+  >();
+  for (let i = 0; i < productIds.length; i += 50) {
+    const chunk = productIds.slice(i, i + 50);
+    const response = await admin.graphql(PRODUCT_PEER_VARIANTS_QUERY, {
+      variables: { ids: chunk },
+    });
+    const data = (await response.json()) as {
+      data?: {
+        nodes?: Array<
+          | {
+              id: string;
+              title: string;
+              variants: {
+                edges: Array<{
+                  node: {
+                    id: string;
+                    title: string;
+                    sku: string | null;
+                    selectedOptions: Array<{ name: string; value: string }>;
+                  };
+                }>;
+              };
+            }
+          | null
+        >;
+      };
+    };
+    for (const product of data.data?.nodes ?? []) {
+      if (!product?.id) continue;
+      for (const edge of product.variants.edges) {
+        const v = edge.node;
+        if (variantInfo.has(v.id)) continue;
+        peerInfo.set(v.id, {
+          productId: product.id,
+          productTitle: product.title,
+          title: v.title,
+          sku: v.sku,
+          selectedOptions: v.selectedOptions ?? [],
+        });
+      }
+    }
+  }
+
+  // 3. Source-location available qty per variant — for both sold
+  // variants and peers (so click-to-add cells know what's available).
+  const peerIds = Array.from(peerInfo.keys());
+  const invMap = await getVariantsInventory(admin, [
+    ...variantIds,
+    ...peerIds,
+  ]);
   const sourceAvailableByVariant = new Map<string, number>();
   for (const [variantId, inv] of invMap.entries()) {
     const level = inv.levels.find((l) => l.locationId === sourceLocationGid);
@@ -181,8 +278,25 @@ export async function buildReplenishmentReport(
     else shortOrOOS++;
   }
 
+  // Peer variants (unsold sister sizes/colors of products that had a
+  // sale). The UI uses these for click-empty-cell add — sold=0, source
+  // availability still resolved.
+  const peerVariants: ReplenishmentRow[] = Array.from(peerInfo.entries()).map(
+    ([variantId, meta]) => ({
+      variantId,
+      productId: meta.productId,
+      productTitle: meta.productTitle,
+      variantTitle: meta.title,
+      sku: meta.sku,
+      selectedOptions: meta.selectedOptions,
+      sold: 0,
+      sourceAvailable: sourceAvailableByVariant.get(variantId) ?? 0,
+    }),
+  );
+
   return {
     rows,
+    peerVariants,
     summary: {
       totalUnitsSold,
       variantsSold: rows.length,
