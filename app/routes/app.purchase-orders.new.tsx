@@ -85,6 +85,7 @@ interface SelectedVariant {
   variantTitle: string;
   sku: string;
   barcode: string;
+  designId: string | null;
   unitCost: number;
   retailPrice: number;
   quantityOrdered: number;
@@ -170,6 +171,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variantTitle: li.variantTitle,
             sku: li.sku || null,
             barcode: li.barcode || null,
+            designId: li.designId ?? null,
             unitCost: li.unitCost,
             retailPrice: li.retailPrice,
             quantityOrdered: li.quantityOrdered,
@@ -334,6 +336,7 @@ export default function NewPurchaseOrder() {
             variantTitle: variant.title,
             sku: variant.sku || "",
             barcode: variant.barcode || "",
+            designId: null,
             unitCost: cost,
             retailPrice: parseFloat(variant.price) || 0,
             quantityOrdered: 1,
@@ -462,6 +465,27 @@ export default function NewPurchaseOrder() {
             ? { ...item, unitCost: cost }
             : item,
         ),
+      );
+    },
+    [],
+  );
+
+  // Design ID lives at the colorway level (product + non-size options).
+  // Update every selected variant sharing that key in one shot.
+  const handleRowDesignIdChange = useCallback(
+    (productId: string, nonSizeLabel: string, designId: string) => {
+      const next = designId.trim() === "" ? null : designId;
+      setSelectedItems((prev) =>
+        prev.map((item) => {
+          if (item.shopifyProductId !== productId) return item;
+          const itemNonSize = (item.selectedOptions ?? [])
+            .filter((o) => o.name.toLowerCase() !== "size")
+            .map((o) => o.value)
+            .join(" / ");
+          return itemNonSize === nonSizeLabel
+            ? { ...item, designId: next }
+            : item;
+        }),
       );
     },
     [],
@@ -924,6 +948,7 @@ export default function NewPurchaseOrder() {
                     items={selectedItems}
                     onQuantityChange={handleQuantityChange}
                     onCostChange={handleCostChange}
+                    onRowDesignIdChange={handleRowDesignIdChange}
                     onRemove={handleRemoveItem}
                   />
                 ) : (
@@ -1220,13 +1245,35 @@ function LineItemView({
   items,
   onQuantityChange,
   onCostChange,
+  onRowDesignIdChange,
   onRemove,
 }: {
   items: SelectedVariant[];
   onQuantityChange: (id: string, qty: string) => void;
   onCostChange: (id: string, cost: number) => void;
+  onRowDesignIdChange: (productId: string, nonSizeLabel: string, designId: string) => void;
   onRemove: (id: string) => void;
 }) {
+  // Derive the (productId, nonSizeLabel) row key for each item so the
+  // Design ID input writes to every line in the same colorway in one
+  // shot. Visually still one input per line — keeps the table simple —
+  // but the change handler propagates to peers.
+  const rowKey = (item: SelectedVariant): string => {
+    const nonSize = (item.selectedOptions ?? [])
+      .filter((o) => o.name.toLowerCase() !== "size")
+      .map((o) => o.value)
+      .join(" / ");
+    return `${item.shopifyProductId}::${nonSize}`;
+  };
+  // Snapshot the current per-row designId from the first item we see
+  // for each row so all rows in the same colorway show the same value.
+  const designIdByRow = new Map<string, string>();
+  for (const item of items) {
+    const key = rowKey(item);
+    if (!designIdByRow.has(key)) {
+      designIdByRow.set(key, item.designId ?? "");
+    }
+  }
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
@@ -1235,6 +1282,7 @@ function LineItemView({
             <th style={{ padding: "8px", textAlign: "left" }}>Product</th>
             <th style={{ padding: "8px", textAlign: "left" }}>Variant</th>
             <th style={{ padding: "8px", textAlign: "left" }}>SKU</th>
+            <th style={{ padding: "8px", textAlign: "left", width: "140px" }}>Design ID</th>
             <th style={{ padding: "8px", textAlign: "right" }}>Cost</th>
             <th style={{ padding: "8px", textAlign: "right" }}>Retail</th>
             <th style={{ padding: "8px", textAlign: "right" }}>In Stock</th>
@@ -1253,6 +1301,22 @@ function LineItemView({
               <td style={{ padding: "8px" }}>{item.productTitle}</td>
               <td style={{ padding: "8px" }}>{item.variantTitle}</td>
               <td style={{ padding: "8px" }}>{item.sku || "—"}</td>
+              <td style={{ padding: "4px 8px" }}>
+                <TextField
+                  label=""
+                  labelHidden
+                  value={designIdByRow.get(rowKey(item)) ?? ""}
+                  onChange={(val) => {
+                    const nonSize = (item.selectedOptions ?? [])
+                      .filter((o) => o.name.toLowerCase() !== "size")
+                      .map((o) => o.value)
+                      .join(" / ");
+                    onRowDesignIdChange(item.shopifyProductId, nonSize, val);
+                  }}
+                  autoComplete="off"
+                  placeholder="—"
+                />
+              </td>
               <td
                 style={{
                   padding: "2px 4px",

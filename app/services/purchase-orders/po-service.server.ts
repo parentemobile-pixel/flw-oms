@@ -11,6 +11,10 @@ export interface POLineItemInput {
   variantTitle: string;
   sku?: string | null;
   barcode?: string | null;
+  /** Per-row internal design reference. Same designId for every line
+   *  item in the same product+colorway row (e.g. all Navy sizes share
+   *  one designId). Renders on the PO PDF when set. */
+  designId?: string | null;
   unitCost: number;
   retailPrice: number;
   quantityOrdered: number;
@@ -139,6 +143,7 @@ export async function createPurchaseOrder(shop: string, data: CreatePOInput) {
           variantTitle: li.variantTitle,
           sku: li.sku ?? null,
           barcode: li.barcode ?? null,
+          designId: li.designId ?? null,
           unitCost: li.unitCost,
           retailPrice: li.retailPrice,
           quantityOrdered: li.quantityOrdered,
@@ -295,6 +300,7 @@ export async function updatePurchaseOrder(
                 variantTitle: li.variantTitle,
                 sku: li.sku ?? null,
                 barcode: li.barcode ?? null,
+                designId: li.designId ?? null,
                 unitCost: li.unitCost,
                 retailPrice: li.retailPrice,
                 quantityOrdered: li.quantityOrdered,

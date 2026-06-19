@@ -9,6 +9,10 @@ interface POLineForPdf {
   variantTitle: string;
   sku: string | null;
   barcode: string | null;
+  /** Per-row designId. Same value across every line that shares a
+   *  colorway row; first non-null wins when collapsing rows in grid
+   *  view. Renders next to the row label / product cell when set. */
+  designId?: string | null;
   unitCost: number;
   retailPrice: number;
   quantityOrdered: number;
@@ -308,17 +312,28 @@ function drawLineTable(
     }
     x += imgColW;
 
-    // ── Product cell (title + optional cutting ticket subtitle) ──
+    // ── Product cell (title + optional designId + cutting ticket subtitles) ──
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
     doc.text(truncate(li.productTitle, 34), x, y);
+    let subOffset = 0.14;
+    if (li.designId) {
+      // Per-row internal design reference. Bold prefix so it reads
+      // distinct from the product title.
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "bold");
+      doc.text(`Design: ${truncate(li.designId, 40)}`, x, y + subOffset);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      subOffset += 0.1;
+    }
     if (li.cuttingTicket) {
       doc.setFontSize(6);
       doc.setFont("helvetica", "italic");
       doc.text(
         `Cutting: ${truncate(li.cuttingTicket, 44)}`,
         x,
-        y + 0.14,
+        y + subOffset,
       );
       doc.setFont("helvetica", "normal");
       doc.setFontSize(8);
@@ -371,6 +386,7 @@ function drawGridTable(
       retail: number;
       imageDataUrl: string | null;
       cuttingTicket: string | null;
+      designId: string | null;
       bySize: Record<string, { ordered: number; received: number }>;
     }
   >();
@@ -395,8 +411,14 @@ function drawGridTable(
         retail: li.retailPrice,
         imageDataUrl: li.imageDataUrl ?? null,
         cuttingTicket: li.cuttingTicket ?? null,
+        designId: li.designId ?? null,
         bySize: {},
       });
+    } else {
+      // Late-binding designId — first non-null wins across the row's
+      // line items so a mixed PO doesn't lose the value.
+      const existing = rowMap.get(key)!;
+      if (!existing.designId && li.designId) existing.designId = li.designId;
     }
     rowMap.get(key)!.bySize[size] = {
       ordered: li.quantityOrdered,
@@ -499,17 +521,30 @@ function drawGridTable(
     }
     x += imgColW;
 
-    // ── Product cell (title + optional cutting ticket subtitle) ──
+    // ── Product cell (title + optional designId + cutting subtitle) ──
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
     doc.text(truncate(row.label, 38), x, y);
+    let subOffset = 0.14;
+    if (row.designId) {
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "bold");
+      doc.text(
+        `Design: ${truncate(row.designId, 40)}`,
+        x,
+        y + subOffset,
+      );
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      subOffset += 0.1;
+    }
     if (row.cuttingTicket) {
       doc.setFontSize(6);
       doc.setFont("helvetica", "italic");
       doc.text(
         `Cutting: ${truncate(row.cuttingTicket, 44)}`,
         x,
-        y + 0.14,
+        y + subOffset,
       );
       doc.setFont("helvetica", "normal");
       doc.setFontSize(8);

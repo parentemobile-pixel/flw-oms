@@ -149,6 +149,7 @@ model PurchaseOrderLineItem {
   variantTitle     String
   sku              String?
   barcode          String?
+  designId         String? // per-row (product+color) internal design ref; printed on PDF when set
   unitCost         Float    @default(0)
   retailPrice      Float    @default(0)
   quantityOrdered  Int      @default(0)

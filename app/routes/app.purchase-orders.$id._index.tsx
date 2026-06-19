@@ -222,6 +222,7 @@ interface EditableLine {
   variantTitle: string;
   sku: string | null;
   barcode: string | null;
+  designId: string | null;
   unitCost: number;
   retailPrice: number;
   quantityOrdered: number;
@@ -276,6 +277,7 @@ export default function PurchaseOrderDetail() {
       variantTitle: li.variantTitle,
       sku: li.sku,
       barcode: li.barcode,
+      designId: li.designId ?? null,
       unitCost: li.unitCost,
       retailPrice: li.retailPrice,
       quantityOrdered: li.quantityOrdered,
@@ -343,6 +345,7 @@ export default function PurchaseOrderDetail() {
           variantTitle: hit.variantTitle,
           sku: hit.sku,
           barcode: hit.barcode,
+          designId: null,
           unitCost: hit.unitCost,
           retailPrice: hit.retailPrice,
           quantityOrdered: 1,
@@ -444,6 +447,7 @@ export default function PurchaseOrderDetail() {
               variantTitle: l.variantTitle,
               sku: l.sku,
               barcode: l.barcode,
+              designId: l.designId,
               unitCost: l.unitCost,
               retailPrice: l.retailPrice,
               quantityOrdered: l.quantityOrdered,
@@ -1250,6 +1254,15 @@ export default function PurchaseOrderDetail() {
                         <th
                           style={{
                             padding: "8px",
+                            textAlign: "left",
+                            width: "140px",
+                          }}
+                        >
+                          Design ID
+                        </th>
+                        <th
+                          style={{
+                            padding: "8px",
                             textAlign: "right",
                             minWidth: "100px",
                           }}
@@ -1297,6 +1310,33 @@ export default function PurchaseOrderDetail() {
                           </td>
                           <td style={{ padding: "8px" }}>
                             {line.sku || "—"}
+                          </td>
+                          <td style={{ padding: "4px 8px" }}>
+                            <TextField
+                              label="Design ID"
+                              labelHidden
+                              value={line.designId ?? ""}
+                              placeholder="—"
+                              autoComplete="off"
+                              onChange={(val) => {
+                                const next = val.trim() === "" ? null : val;
+                                const { nonSize } = classifyVariantTitle(
+                                  line.variantTitle,
+                                );
+                                setEditLines((prev) =>
+                                  prev.map((l) => {
+                                    if (l.shopifyProductId !== line.shopifyProductId)
+                                      return l;
+                                    const peer = classifyVariantTitle(
+                                      l.variantTitle,
+                                    );
+                                    return peer.nonSize === nonSize
+                                      ? { ...l, designId: next }
+                                      : l;
+                                  }),
+                                );
+                              }}
+                            />
                           </td>
                           <td style={{ padding: "2px 4px" }}>
                             <MoneyField
