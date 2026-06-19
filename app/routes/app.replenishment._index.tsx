@@ -36,6 +36,7 @@ import {
   type ReplenishmentReport,
   type ReplenishmentRow,
 } from "../services/replenishment/replenishment.server";
+import { createTransfer } from "../services/transfers/transfer-service.server";
 import { LocationPicker } from "../components/LocationPicker";
 import {
   ProductGrid,
@@ -111,6 +112,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
+  const intent = String(formData.get("intent") ?? "report");
+
+  if (intent === "createTransfers") {
+    return handleCreateTransfersAction(session.shop, formData);
+  }
+
   const sourceLocationGid = String(formData.get("sourceLocationId") ?? "");
   const destLocationGid = String(formData.get("destLocationId") ?? "");
   const startDate = String(formData.get("startDate") ?? "");
@@ -164,6 +171,91 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 };
+
+// Multi-transfer split — groups the working rows by their box number
+// (assigned per-row in the UI) and creates one draft transfer per box.
+// Box numbering is just a packing-slip convenience: "Box 1 of 3" etc.
+async function handleCreateTransfersAction(
+  shop: string,
+  formData: FormData,
+): Promise<ReturnType<typeof json>> {
+  const fromLocationId = String(formData.get("fromLocationId") ?? "");
+  const toLocationId = String(formData.get("toLocationId") ?? "");
+  const namePrefix = String(formData.get("namePrefix") ?? "").trim();
+  const payloadJson = String(formData.get("payload") ?? "");
+
+  if (!fromLocationId || !toLocationId) {
+    return json({ error: "Missing locations." });
+  }
+
+  type Line = {
+    shopifyProductId: string;
+    shopifyVariantId: string;
+    productTitle: string;
+    variantTitle: string;
+    sku: string | null;
+    quantitySent: number;
+    box: number;
+  };
+  let lines: Line[];
+  try {
+    lines = JSON.parse(payloadJson) as Line[];
+  } catch {
+    return json({ error: "Couldn't parse transfer payload." });
+  }
+  const positive = lines.filter((l) => l.quantitySent > 0);
+  if (positive.length === 0) {
+    return json({ error: "Nothing to transfer." });
+  }
+
+  const byBox = new Map<number, Line[]>();
+  for (const l of positive) {
+    const box = Math.max(1, Math.floor(l.box || 1));
+    const arr = byBox.get(box) ?? [];
+    arr.push(l);
+    byBox.set(box, arr);
+  }
+  const boxes = Array.from(byBox.keys()).sort((a, b) => a - b);
+  const total = boxes.length;
+
+  const created: Array<{ id: string; transferNumber: string; name: string }> =
+    [];
+  try {
+    for (const box of boxes) {
+      const linesForBox = byBox.get(box)!;
+      const name = total === 1
+        ? (namePrefix || null)
+        : `${namePrefix || "Replenishment"} — Box ${box} / ${total}`;
+      const transfer = await createTransfer(shop, {
+        name,
+        fromLocationId,
+        toLocationId,
+        lineItems: linesForBox.map((l) => ({
+          shopifyProductId: l.shopifyProductId,
+          shopifyVariantId: l.shopifyVariantId,
+          productTitle: l.productTitle,
+          variantTitle: l.variantTitle,
+          sku: l.sku,
+          quantitySent: l.quantitySent,
+        })),
+      });
+      created.push({
+        id: transfer.id,
+        transferNumber: transfer.transferNumber,
+        name: transfer.name ?? "",
+      });
+    }
+  } catch (error) {
+    return json({
+      error: `Created ${created.length} of ${total} drafts. ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      createdDrafts: created,
+    });
+  }
+
+  return json({ createdDrafts: created });
+}
 
 // ── Note flag logic ─────────────────────────────────────────────────
 // Mirrors the user's CLI per-row note semantics. A "row" here is a
@@ -225,6 +317,11 @@ interface SavedActionData {
   startDate?: string;
   endDate?: string;
   error?: string;
+  createdDrafts?: Array<{
+    id: string;
+    transferNumber: string;
+    name: string;
+  }>;
 }
 
 export default function Replenishment() {
@@ -266,6 +363,11 @@ export default function Replenishment() {
   const [addedPeerIds, setAddedPeerIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // Per-row box assignment (keyed by `${productId}::${nonSizeLabel}`).
+  // Default 1 (= one big transfer); user can raise individual rows to
+  // 2, 3, etc. so "Create transfer(s)" splits into N drafts.
+  const [boxByRowKey, setBoxByRowKey] = useState<Record<string, number>>({});
+  const [transferNamePrefix, setTransferNamePrefix] = useState("");
 
   // Use the raw rows the action returned, then drop anything the user
   // dismissed via the X. Summary still reflects the full report — the
@@ -414,7 +516,18 @@ export default function Replenishment() {
     [rowByVariantId],
   );
 
-  // Per-row trailing column: the note badge classifying the row.
+  // Helper: derive the (productId, nonSizeLabel) row key from any cell.
+  const rowKeyFor = useCallback((c: GridCell): string => {
+    const nonSize = c.selectedOptions
+      .filter((o) => o.name.toLowerCase() !== "size")
+      .map((o) => o.value)
+      .join(" / ");
+    return `${c.productId}::${nonSize}`;
+  }, []);
+
+  // Per-row trailing column: box-number input + note badge. The box
+  // input is the per-row split key — all rows sharing a box number
+  // land in the same draft transfer when the user creates them.
   const renderRowTrailing = useCallback(
     ({ cells: rowCells }: { cells: GridCell[] }) => {
       const sizeCells = rowCells.map((c) => {
@@ -429,9 +542,30 @@ export default function Replenishment() {
         };
       });
       const note = classifyRow(sizeCells);
-      return <NoteBadge note={note} />;
+      const key = rowCells[0] ? rowKeyFor(rowCells[0]) : "";
+      const box = boxByRowKey[key] ?? 1;
+      return (
+        <BlockStack gap="100" align="end">
+          <div style={{ width: "60px" }}>
+            <TextField
+              label="Box"
+              labelHidden
+              type="number"
+              value={String(box)}
+              onChange={(val) => {
+                const next = Math.max(1, parseInt(val, 10) || 1);
+                setBoxByRowKey((prev) => ({ ...prev, [key]: next }));
+              }}
+              min={1}
+              autoComplete="off"
+              prefix="Box"
+            />
+          </div>
+          <NoteBadge note={note} />
+        </BlockStack>
+      );
     },
-    [rowByVariantId],
+    [rowByVariantId, rowKeyFor, boxByRowKey],
   );
 
   const handleRunReport = useCallback(() => {
@@ -450,23 +584,34 @@ export default function Replenishment() {
     setEndDate(isoDate(now));
   }, []);
 
-  // "Create transfer" — stash prefill in localStorage, then navigate to
-  // /app/transfers/new. The new-transfer page reads the key on mount,
-  // applies the rows + locations, and clears the key so a refresh
-  // doesn't re-apply. Same-tab navigation keeps localStorage scoped
-  // correctly.
+  // "Create transfer" — two paths depending on box assignment.
+  //   Single box (default): stash prefill in localStorage and navigate
+  //     to /app/transfers/new so the user can review/name/send.
+  //   Multi-box: POST to this route's action, which creates N drafts
+  //     server-side, named "{prefix} — Box K / N". Faster physical
+  //     packing workflow.
   const handleCreateTransfer = useCallback(() => {
     if (!sourceLocationId || !destLocationId) return;
     const rows = reportRows
-      .map((r) => ({
-        variantId: r.variantId,
-        productId: r.productId,
-        productTitle: r.productTitle,
-        variantTitle: r.variantTitle,
-        sku: r.sku,
-        selectedOptions: r.selectedOptions,
-        quantitySent: transferQty[r.variantId] ?? 0,
-      }))
+      .map((r) => {
+        const nonSize = r.selectedOptions
+          .filter((o) => o.name.toLowerCase() !== "size")
+          .map((o) => o.value)
+          .join(" / ");
+        const key = `${r.productId}::${nonSize}`;
+        return {
+          variantId: r.variantId,
+          shopifyProductId: r.productId,
+          shopifyVariantId: r.variantId,
+          productId: r.productId,
+          productTitle: r.productTitle,
+          variantTitle: r.variantTitle,
+          sku: r.sku,
+          selectedOptions: r.selectedOptions,
+          quantitySent: transferQty[r.variantId] ?? 0,
+          box: boxByRowKey[key] ?? 1,
+        };
+      })
       .filter((r) => r.quantitySent > 0);
     if (rows.length === 0) {
       window.alert(
@@ -474,20 +619,63 @@ export default function Replenishment() {
       );
       return;
     }
-    const payload = {
-      ts: Date.now(),
-      fromLocationId: sourceLocationId,
-      toLocationId: destLocationId,
-      rows,
-    };
-    try {
-      window.localStorage.setItem(PREFILL_STORAGE_KEY, JSON.stringify(payload));
-    } catch (err) {
-      console.error("Couldn't write transfer prefill", err);
-      window.alert("Couldn't stash the prefill — proceeding without it.");
+
+    const distinctBoxes = new Set(rows.map((r) => r.box));
+    if (distinctBoxes.size <= 1) {
+      // Single-box path — preserve the localStorage + review flow.
+      const payload = {
+        ts: Date.now(),
+        fromLocationId: sourceLocationId,
+        toLocationId: destLocationId,
+        rows: rows.map(
+          ({ box: _box, shopifyProductId: _p, shopifyVariantId: _v, ...rest }) =>
+            rest,
+        ),
+      };
+      try {
+        window.localStorage.setItem(
+          PREFILL_STORAGE_KEY,
+          JSON.stringify(payload),
+        );
+      } catch (err) {
+        console.error("Couldn't write transfer prefill", err);
+        window.alert("Couldn't stash the prefill — proceeding without it.");
+      }
+      navigate("/app/transfers/new");
+      return;
     }
-    navigate("/app/transfers/new");
-  }, [sourceLocationId, destLocationId, reportRows, transferQty, navigate]);
+
+    // Multi-box: submit to this route's action.
+    const fd = new FormData();
+    fd.set("intent", "createTransfers");
+    fd.set("fromLocationId", sourceLocationId);
+    fd.set("toLocationId", destLocationId);
+    fd.set("namePrefix", transferNamePrefix);
+    fd.set(
+      "payload",
+      JSON.stringify(
+        rows.map((r) => ({
+          shopifyProductId: r.shopifyProductId,
+          shopifyVariantId: r.shopifyVariantId,
+          productTitle: r.productTitle,
+          variantTitle: r.variantTitle,
+          sku: r.sku,
+          quantitySent: r.quantitySent,
+          box: r.box,
+        })),
+      ),
+    );
+    submit(fd, { method: "post" });
+  }, [
+    sourceLocationId,
+    destLocationId,
+    reportRows,
+    transferQty,
+    boxByRowKey,
+    transferNamePrefix,
+    navigate,
+    submit,
+  ]);
 
   const totalProposed = Object.values(transferQty).reduce(
     (s, n) => s + (n || 0),
@@ -568,6 +756,35 @@ export default function Replenishment() {
             <Banner tone="critical">{actionData.error}</Banner>
           </Layout.Section>
         )}
+
+        {actionData &&
+          "createdDrafts" in actionData &&
+          actionData.createdDrafts &&
+          actionData.createdDrafts.length > 0 && (
+            <Layout.Section>
+              <Banner tone="success" title="Drafts created">
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodyMd">
+                    Created {actionData.createdDrafts.length} draft transfer
+                    {actionData.createdDrafts.length === 1 ? "" : "s"}. Open
+                    each to review and send.
+                  </Text>
+                  <InlineStack gap="200" wrap>
+                    {actionData.createdDrafts.map((d) => (
+                      <Button
+                        key={d.id}
+                        url={`/app/transfers/${d.id}`}
+                        size="slim"
+                      >
+                        #{d.transferNumber}
+                        {d.name ? ` — ${d.name}` : ""}
+                      </Button>
+                    ))}
+                  </InlineStack>
+                </BlockStack>
+              </Banner>
+            </Layout.Section>
+          )}
 
         {/* Filters */}
         <Layout.Section>
@@ -766,15 +983,58 @@ export default function Replenishment() {
         {/* Create transfer + export */}
         {reportRows.length > 0 && (
           <Layout.Section>
-            <InlineStack align="end" gap="200">
+            <InlineStack align="end" gap="200" blockAlign="end" wrap>
+              {(() => {
+                const distinctBoxes = new Set(
+                  reportRows
+                    .filter((r) => (transferQty[r.variantId] ?? 0) > 0)
+                    .map((r) => {
+                      const nonSize = r.selectedOptions
+                        .filter((o) => o.name.toLowerCase() !== "size")
+                        .map((o) => o.value)
+                        .join(" / ");
+                      return boxByRowKey[`${r.productId}::${nonSize}`] ?? 1;
+                    }),
+                );
+                if (distinctBoxes.size <= 1) return null;
+                return (
+                  <div style={{ width: "220px" }}>
+                    <TextField
+                      label="Transfer name prefix"
+                      value={transferNamePrefix}
+                      onChange={setTransferNamePrefix}
+                      placeholder="Replenishment"
+                      autoComplete="off"
+                      helpText={`Will create ${distinctBoxes.size} drafts`}
+                    />
+                  </div>
+                );
+              })()}
               <Button onClick={handlePrint}>Print</Button>
               <Button onClick={handleExportCsv}>Export CSV</Button>
               <Button
                 variant="primary"
                 onClick={handleCreateTransfer}
                 disabled={totalProposed === 0}
+                loading={isBusy}
               >
-                {`Create transfer (${totalProposed} units)`}
+                {(() => {
+                  const distinctBoxes = new Set(
+                    reportRows
+                      .filter((r) => (transferQty[r.variantId] ?? 0) > 0)
+                      .map((r) => {
+                        const nonSize = r.selectedOptions
+                          .filter((o) => o.name.toLowerCase() !== "size")
+                          .map((o) => o.value)
+                          .join(" / ");
+                        return boxByRowKey[`${r.productId}::${nonSize}`] ?? 1;
+                      }),
+                  );
+                  const n = distinctBoxes.size;
+                  return n > 1
+                    ? `Create ${n} transfers (${totalProposed} units)`
+                    : `Create transfer (${totalProposed} units)`;
+                })()}
               </Button>
             </InlineStack>
           </Layout.Section>
