@@ -21,39 +21,32 @@ import {
   Button,
   ButtonGroup,
   Banner,
-  Tag,
-  Listbox,
-  Combobox,
-  Icon,
 } from "@shopify/polaris";
-import { SearchIcon } from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { getLocations, type Location } from "../services/shopify-api/locations.server";
-import { getVendors } from "../services/shopify-api/products.server";
-import { buildInventoryValueSnapshot } from "../services/reports/inventory-value-snapshot.server";
+import { buildVariantDaySnapshot } from "../services/forecast/variant-day-snapshot.server";
 
-const DEFAULT_EXCLUDED_VENDORS = ["Colby Davis"];
-
-// Mirror of the constants in stocky-backfill.server — kept inline
-// here because Remix routes can't import .server modules into client
-// code, and the chart logic below runs in the browser.
 const STOCKY_TOTAL_LOCATION_ID = "stocky-total";
-const STOCKY_TOTAL_LABEL = "All locations (Stocky historical)";
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const [locations, vendors, snapshotCount] = await Promise.all([
-    getLocations(admin, session.shop).catch(() => [] as Location[]),
-    getVendors(admin, session.shop).catch(() => [] as string[]),
-    db.inventoryValueSnapshot.count({ where: { shop: session.shop } }),
+  const { session } = await authenticate.admin(request);
+  const [productTypes, variantDayCount] = await Promise.all([
+    db.variantDaySnapshot.findMany({
+      where: { shop: session.shop, productType: { not: "" } },
+      select: { productType: true },
+      distinct: ["productType"],
+    }),
+    db.variantDaySnapshot.count({ where: { shop: session.shop } }),
   ]);
-  return json({ locations, vendors, snapshotCount });
+  return json({
+    productTypes: productTypes.map((r) => r.productType).sort(),
+    variantDayCount,
+  });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -63,7 +56,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "rebuild") {
     try {
-      const result = await buildInventoryValueSnapshot(admin, session.shop);
+      const result = await buildVariantDaySnapshot(admin, session.shop);
       return json({ rebuiltAt: new Date().toISOString(), result });
     } catch (error) {
       return json({
@@ -76,95 +69,171 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const startDate = String(formData.get("startDate") ?? "");
   const endDate = String(formData.get("endDate") ?? "");
-  const locationsCsv = String(formData.get("locations") ?? "");
-  const vendorsCsv = String(formData.get("vendors") ?? "");
-  const excludeVendorsCsv = String(formData.get("excludeVendors") ?? "");
-
+  const productTypesCsv = String(formData.get("productTypes") ?? "");
   if (!startDate || !endDate) {
     return json({ error: "Pick a date range." });
   }
-
   const startTs = new Date(`${startDate}T00:00:00Z`);
   const endTs = new Date(`${endDate}T23:59:59Z`);
-  const selectedLocations = locationsCsv ? locationsCsv.split(",").filter(Boolean) : [];
-  const selectedVendors = vendorsCsv ? vendorsCsv.split(",").filter(Boolean) : [];
-  const excludedVendors = excludeVendorsCsv
-    ? excludeVendorsCsv.split(",").filter(Boolean)
+  const selectedTypes = productTypesCsv
+    ? productTypesCsv.split(",").filter(Boolean)
     : [];
 
-  const where: Parameters<typeof db.inventoryValueSnapshot.findMany>[0] = {
+  // Per-date sums from variant_day. Clip negative on_hand to zero
+  // (oversold units don't count toward valuation — you don't own what
+  // you owe). Group at DATE granularity for the chart.
+  const dailyRows = await db.variantDaySnapshot.findMany({
     where: {
       shop: session.shop,
-      periodEnd: { gte: startTs, lte: endTs },
-      ...(selectedLocations.length > 0
-        ? { locationId: { in: selectedLocations } }
-        : {}),
-      ...(selectedVendors.length > 0
-        ? { vendor: { in: selectedVendors } }
-        : excludedVendors.length > 0
-          ? { vendor: { notIn: excludedVendors } }
-          : {}),
+      date: { gte: startTs, lte: endTs },
+      ...(selectedTypes.length > 0 ? { productType: { in: selectedTypes } } : {}),
     },
-    orderBy: [{ periodEnd: "asc" }, { locationId: "asc" }, { vendor: "asc" }],
-  };
+    select: {
+      date: true,
+      onHand: true,
+      unitCost: true,
+      price: true,
+      productType: true,
+    },
+  });
 
-  const snapshots = await db.inventoryValueSnapshot.findMany(where);
-  return json({ snapshots, queriedAt: new Date().toISOString() });
+  // Roll up per calendar date (client-side — SQLite groupBy on a
+  // computed date-string isn't first-class in Prisma).
+  const byDate = new Map<
+    string,
+    { units: number; cost: number; retail: number }
+  >();
+  for (const row of dailyRows) {
+    const onHandPositive = Math.max(0, row.onHand);
+    if (onHandPositive === 0) continue;
+    const key = row.date.toISOString().slice(0, 10);
+    const entry = byDate.get(key) ?? { units: 0, cost: 0, retail: 0 };
+    entry.units += onHandPositive;
+    entry.cost += onHandPositive * row.unitCost;
+    entry.retail += onHandPositive * row.price;
+    byDate.set(key, entry);
+  }
+  const variantDaySeries = Array.from(byDate.entries())
+    .map(([date, v]) => ({ date, ...v }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // Latest-day per-category breakdown (only when types aren't filtered
+  // — surface a snapshot of the mix). Aggregates the same dailyRows
+  // for whichever the newest date is.
+  const latestDate = variantDaySeries.length > 0
+    ? variantDaySeries[variantDaySeries.length - 1].date
+    : null;
+  const byCategoryLatest = new Map<
+    string,
+    { units: number; cost: number; retail: number }
+  >();
+  if (latestDate) {
+    for (const row of dailyRows) {
+      const dateKey = row.date.toISOString().slice(0, 10);
+      if (dateKey !== latestDate) continue;
+      const onHandPositive = Math.max(0, row.onHand);
+      if (onHandPositive === 0) continue;
+      const cat = row.productType || "(uncategorized)";
+      const entry = byCategoryLatest.get(cat) ?? { units: 0, cost: 0, retail: 0 };
+      entry.units += onHandPositive;
+      entry.cost += onHandPositive * row.unitCost;
+      entry.retail += onHandPositive * row.price;
+      byCategoryLatest.set(cat, entry);
+    }
+  }
+  const categoryBreakdown = Array.from(byCategoryLatest.entries())
+    .map(([category, v]) => ({ category, ...v }))
+    .sort((a, b) => b.cost - a.cost);
+
+  // Pre-cutover Stocky sentinel rows for shop-total fallback. Only
+  // included when no product-type filter is active — Stocky data
+  // doesn't have a category breakdown.
+  let stockySeries: Array<{ date: string; cost: number; retail: number }> = [];
+  if (selectedTypes.length === 0) {
+    const cutover = variantDaySeries.length > 0
+      ? new Date(variantDaySeries[0].date + "T00:00:00Z")
+      : endTs;
+    const stockyRows = await db.inventoryValueSnapshot.findMany({
+      where: {
+        shop: session.shop,
+        locationId: STOCKY_TOTAL_LOCATION_ID,
+        periodEnd: { gte: startTs, lt: cutover },
+      },
+      select: {
+        periodEnd: true,
+        totalCostValue: true,
+        totalRetailValue: true,
+      },
+      orderBy: { periodEnd: "asc" },
+    });
+    stockySeries = stockyRows.map((r) => ({
+      date: r.periodEnd.toISOString().slice(0, 10),
+      cost: r.totalCostValue,
+      retail: r.totalRetailValue,
+    }));
+  }
+
+  return json({
+    variantDaySeries,
+    stockySeries,
+    categoryBreakdown,
+    queriedAt: new Date().toISOString(),
+  });
 };
 
-type SnapshotRow = {
-  id: string;
-  shop: string;
-  locationId: string;
-  vendor: string | null;
-  periodEnd: string;
-  totalUnits: number;
-  totalCostValue: number;
-  totalRetailValue: number;
-  generatedAt: string;
-};
+interface ChartPoint {
+  date: string;
+  cost: number;
+  retail: number;
+}
+
+interface CategoryRow {
+  category: string;
+  units: number;
+  cost: number;
+  retail: number;
+}
 
 interface ActionPayload {
-  snapshots?: SnapshotRow[];
+  variantDaySeries?: Array<{
+    date: string;
+    units: number;
+    cost: number;
+    retail: number;
+  }>;
+  stockySeries?: ChartPoint[];
+  categoryBreakdown?: CategoryRow[];
   rebuiltAt?: string;
-  result?: { rowsWritten: number; productCount: number };
+  result?: {
+    date: string;
+    variantsWritten: number;
+    productsSeen: number;
+    totalOnHand: number;
+    totalUnitsSold: number;
+  };
   error?: string;
 }
 
 export default function InventoryValueReport() {
-  const { locations, vendors, snapshotCount } = useLoaderData<typeof loader>();
+  const { productTypes, variantDayCount } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>() as ActionPayload | undefined;
   const submit = useSubmit();
   const navigation = useNavigation();
   const isBusy = navigation.state === "submitting";
 
   const [startDate, setStartDate] = useState(() =>
-    isoDate(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)),
+    isoDate(new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)),
   );
   const [endDate, setEndDate] = useState(() => isoDate(new Date()));
-  const [selectedLocations, setSelectedLocations] = useState<string[]>([]);
-  const [selectedVendors, setSelectedVendors] = useState<string[]>([]);
-  const [excludeDefault, setExcludeDefault] = useState(true);
-  const [vendorQuery, setVendorQuery] = useState("");
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
 
   const handleQuery = useCallback(() => {
     const fd = new FormData();
     fd.set("startDate", startDate);
     fd.set("endDate", endDate);
-    fd.set("locations", selectedLocations.join(","));
-    fd.set("vendors", selectedVendors.join(","));
-    if (excludeDefault && selectedVendors.length === 0) {
-      fd.set("excludeVendors", DEFAULT_EXCLUDED_VENDORS.join(","));
-    }
+    fd.set("productTypes", selectedTypes.join(","));
     submit(fd, { method: "post" });
-  }, [
-    startDate,
-    endDate,
-    selectedLocations,
-    selectedVendors,
-    excludeDefault,
-    submit,
-  ]);
+  }, [startDate, endDate, selectedTypes, submit]);
 
   const handleRebuild = useCallback(() => {
     const fd = new FormData();
@@ -178,75 +247,24 @@ export default function InventoryValueReport() {
     setEndDate(isoDate(now));
   }, []);
 
-  const locationName = useCallback(
-    (id: string) => {
-      if (id === STOCKY_TOTAL_LOCATION_ID) return STOCKY_TOTAL_LABEL;
-      return locations.find((l) => l.id === id)?.name ?? id;
-    },
-    [locations],
-  );
-
-  const snapshots = actionData?.snapshots ?? [];
-
-  // Roll up the time series — sum across all returned snapshots per
-  // date so the chart shows total cost-value and retail-value per day.
-  // Two-pass dedup: cron rollups win on any date where both cron and
-  // Stocky-imported rows exist, since the cron reflects real-time
-  // per-location stock and Stocky's total inventory is a coarser
-  // approximation of the same number.
-  const series = useMemo(() => {
-    const byDate = new Map<
-      string,
-      { cost: number; retail: number; units: number; source: "cron" | "stocky" }
-    >();
-    // Pass 1: cron-source rollup rows.
-    for (const s of snapshots) {
-      const isRollup = s.vendor == null;
-      if (selectedVendors.length === 0 && !isRollup) continue;
-      if (selectedVendors.length > 0 && isRollup) continue;
-      if (s.locationId === STOCKY_TOTAL_LOCATION_ID) continue;
-      const date = s.periodEnd.slice(0, 10);
-      const entry = byDate.get(date) ?? {
-        cost: 0,
-        retail: 0,
-        units: 0,
-        source: "cron" as const,
-      };
-      entry.cost += s.totalCostValue;
-      entry.retail += s.totalRetailValue;
-      entry.units += s.totalUnits;
-      byDate.set(date, entry);
-    }
-    // Pass 2: Stocky-source rows fill dates that don't already have
-    // cron coverage. Skipped entirely when a vendor filter is on —
-    // Stocky's historical_stock_on_hand has no vendor breakdown.
-    if (selectedVendors.length === 0) {
-      for (const s of snapshots) {
-        if (s.locationId !== STOCKY_TOTAL_LOCATION_ID) continue;
-        const date = s.periodEnd.slice(0, 10);
-        if (byDate.has(date)) continue;
-        byDate.set(date, {
-          cost: s.totalCostValue,
-          retail: s.totalRetailValue,
-          units: s.totalUnits,
-          source: "stocky",
-        });
-      }
-    }
-    return Array.from(byDate.entries())
-      .map(([date, v]) => ({ date, cost: v.cost, retail: v.retail, units: v.units }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-  }, [snapshots, selectedVendors]);
-
-  // Latest-day table — one row per (location, vendor) in the most
-  // recent snapshot date returned.
-  const latestRows = useMemo(() => {
-    if (snapshots.length === 0) return [];
-    const latestDate = snapshots[snapshots.length - 1].periodEnd.slice(0, 10);
-    return snapshots.filter(
-      (s) => s.periodEnd.slice(0, 10) === latestDate && s.vendor != null,
+  // Merge Stocky pre-cutover into the same chart series. Two-tone
+  // legend distinguishes the sources.
+  const chartPoints: ChartPoint[] = useMemo(() => {
+    const stocky = actionData?.stockySeries ?? [];
+    const variant = (actionData?.variantDaySeries ?? []).map((p) => ({
+      date: p.date,
+      cost: p.cost,
+      retail: p.retail,
+    }));
+    // Dedup by date (variant_day wins over Stocky sentinel).
+    const seen = new Set(variant.map((p) => p.date));
+    return [...stocky.filter((p) => !seen.has(p.date)), ...variant].sort((a, b) =>
+      a.date.localeCompare(b.date),
     );
-  }, [snapshots]);
+  }, [actionData]);
+
+  const cutoverDate = actionData?.variantDaySeries?.[0]?.date ?? null;
+  const categoryBreakdown = actionData?.categoryBreakdown ?? [];
 
   const csvEscape = (v: unknown): string => {
     const s = v == null ? "" : String(v);
@@ -254,22 +272,12 @@ export default function InventoryValueReport() {
     return s;
   };
   const handleExportCsv = useCallback(() => {
-    if (snapshots.length === 0) return;
-    const header = [
-      "Date",
-      "Location",
-      "Vendor",
-      "Units",
-      "Cost value",
-      "Retail value",
-    ];
-    const rows = snapshots.map((s) => [
-      s.periodEnd.slice(0, 10),
-      locationName(s.locationId),
-      s.vendor ?? "(all)",
-      s.totalUnits,
-      s.totalCostValue.toFixed(2),
-      s.totalRetailValue.toFixed(2),
+    if (chartPoints.length === 0) return;
+    const header = ["Date", "Cost value", "Retail value"];
+    const rows = chartPoints.map((p) => [
+      p.date,
+      p.cost.toFixed(2),
+      p.retail.toFixed(2),
     ]);
     const csv = [header, ...rows]
       .map((r) => r.map(csvEscape).join(","))
@@ -283,15 +291,7 @@ export default function InventoryValueReport() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [snapshots, locationName, startDate, endDate]);
-
-  // Vendor multi-select Combobox (Polaris pattern). Filtered by query.
-  const filteredVendors = useMemo(() => {
-    const q = vendorQuery.trim().toLowerCase();
-    return vendors.filter((v) =>
-      q === "" ? true : v.toLowerCase().includes(q),
-    );
-  }, [vendors, vendorQuery]);
+  }, [chartPoints, startDate, endDate]);
 
   return (
     <Page
@@ -308,31 +308,20 @@ export default function InventoryValueReport() {
         {actionData?.rebuiltAt && actionData.result && (
           <Layout.Section>
             <Banner tone="success">
-              Rebuilt today&rsquo;s snapshot: {actionData.result.rowsWritten}{" "}
-              rows across {actionData.result.productCount} products.
+              Rebuilt today's snapshot: {actionData.result.variantsWritten}{" "}
+              variants across {actionData.result.productsSeen} products —{" "}
+              {actionData.result.totalOnHand.toLocaleString()} units on hand.
             </Banner>
           </Layout.Section>
         )}
-        {snapshotCount === 0 && (
+        {variantDayCount === 0 && (
           <Layout.Section>
-            <Banner tone="info" title="No snapshots yet">
+            <Banner tone="info" title="No per-variant snapshots yet">
               <Text as="p" variant="bodyMd">
-                The nightly snapshot will fire automatically. To see data
-                right now, click <strong>Rebuild today&rsquo;s snapshot</strong>.
-              </Text>
-            </Banner>
-          </Layout.Section>
-        )}
-        {excludeDefault && selectedVendors.length === 0 && (
-          <Layout.Section>
-            <Banner
-              tone="info"
-              onDismiss={() => setExcludeDefault(false)}
-              title="Default exclusions in effect"
-            >
-              <Text as="p" variant="bodyMd">
-                Hiding vendor <strong>Colby Davis</strong> by default.
-                Dismiss this banner to include them.
+                Nightly snapshots kick in on the next cron tick (fires every
+                3 hours after boot). Click <strong>Rebuild today's snapshot</strong>{" "}
+                to populate now. Pre-cutover history comes from the Stocky
+                backfill.
               </Text>
             </Banner>
           </Layout.Section>
@@ -382,98 +371,45 @@ export default function InventoryValueReport() {
                 </BlockStack>
               </InlineStack>
 
-              <BlockStack gap="200">
-                <Text as="h3" variant="headingSm">
-                  Locations
-                </Text>
-                <InlineStack gap="200" wrap>
-                  {locations.map((loc) => {
-                    const checked = selectedLocations.includes(loc.id);
-                    return (
-                      <Button
-                        key={loc.id}
-                        size="slim"
-                        pressed={checked}
-                        onClick={() =>
-                          setSelectedLocations((prev) =>
-                            prev.includes(loc.id)
-                              ? prev.filter((id) => id !== loc.id)
-                              : [...prev, loc.id],
-                          )
-                        }
-                      >
-                        {loc.name}
-                      </Button>
-                    );
-                  })}
-                </InlineStack>
-                {selectedLocations.length === 0 && (
-                  <Text as="span" variant="bodySm" tone="subdued">
-                    No locations selected = include all.
+              {productTypes.length > 0 && (
+                <BlockStack gap="200">
+                  <Text as="h3" variant="headingSm">
+                    Category (product type)
                   </Text>
-                )}
-              </BlockStack>
-
-              <BlockStack gap="200">
-                <Text as="h3" variant="headingSm">
-                  Vendors
-                </Text>
-                <Combobox
-                  activator={
-                    <Combobox.TextField
-                      label=""
-                      labelHidden
-                      value={vendorQuery}
-                      onChange={setVendorQuery}
-                      placeholder="Search and pick vendors…"
-                      autoComplete="off"
-                      prefix={<Icon source={SearchIcon} />}
-                    />
-                  }
-                >
-                  {filteredVendors.length > 0 && (
-                    <Listbox
-                      onSelect={(value) => {
-                        setSelectedVendors((prev) =>
-                          prev.includes(value)
-                            ? prev.filter((v) => v !== value)
-                            : [...prev, value],
-                        );
-                      }}
-                    >
-                      {filteredVendors.slice(0, 30).map((v) => (
-                        <Listbox.Option
-                          key={v}
-                          value={v}
-                          selected={selectedVendors.includes(v)}
+                  <InlineStack gap="200" wrap>
+                    {productTypes.map((t) => {
+                      const checked = selectedTypes.includes(t);
+                      return (
+                        <Button
+                          key={t}
+                          size="slim"
+                          pressed={checked}
+                          onClick={() =>
+                            setSelectedTypes((prev) =>
+                              prev.includes(t)
+                                ? prev.filter((x) => x !== t)
+                                : [...prev, t],
+                            )
+                          }
                         >
-                          {v}
-                        </Listbox.Option>
-                      ))}
-                    </Listbox>
-                  )}
-                </Combobox>
-                {selectedVendors.length > 0 && (
-                  <InlineStack gap="100" wrap>
-                    {selectedVendors.map((v) => (
-                      <Tag
-                        key={v}
-                        onRemove={() =>
-                          setSelectedVendors((prev) =>
-                            prev.filter((x) => x !== v),
-                          )
-                        }
-                      >
-                        {v}
-                      </Tag>
-                    ))}
+                          {t}
+                        </Button>
+                      );
+                    })}
                   </InlineStack>
-                )}
-              </BlockStack>
+                  {selectedTypes.length === 0 && (
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      No categories selected = include all. Filtering by
+                      category drops the Stocky pre-cutover trend since
+                      Stocky data has no category breakdown.
+                    </Text>
+                  )}
+                </BlockStack>
+              )}
 
               <InlineStack align="end" gap="200">
                 <Button onClick={handleRebuild} loading={isBusy}>
-                  Rebuild today&rsquo;s snapshot
+                  Rebuild today's snapshot
                 </Button>
                 <Button variant="primary" onClick={handleQuery} loading={isBusy}>
                   Run query
@@ -484,35 +420,35 @@ export default function InventoryValueReport() {
         </Layout.Section>
 
         {/* Chart */}
-        {series.length > 0 && (
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="300">
-                <Text as="h2" variant="headingMd">
-                  Time series
-                </Text>
-                <LineChart series={series} />
-              </BlockStack>
-            </Card>
-          </Layout.Section>
-        )}
-
-        {/* Snapshot table */}
-        {latestRows.length > 0 && (
+        {chartPoints.length > 0 && (
           <Layout.Section>
             <Card>
               <BlockStack gap="300">
                 <InlineStack align="space-between">
                   <Text as="h2" variant="headingMd">
-                    Most recent snapshot
-                    {latestRows[0]
-                      ? ` — ${latestRows[0].periodEnd.slice(0, 10)}`
-                      : ""}
+                    Time series
                   </Text>
                   <Button onClick={handleExportCsv} size="slim">
                     Export CSV
                   </Button>
                 </InlineStack>
+                <LineChart series={chartPoints} cutoverDate={cutoverDate} />
+              </BlockStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Category breakdown for the latest day */}
+        {categoryBreakdown.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <BlockStack gap="300">
+                <Text as="h2" variant="headingMd">
+                  Most recent breakdown by category
+                  {actionData?.variantDaySeries?.length
+                    ? ` — ${actionData.variantDaySeries[actionData.variantDaySeries.length - 1].date}`
+                    : ""}
+                </Text>
                 <div style={{ overflowX: "auto" }}>
                   <table
                     style={{
@@ -524,10 +460,7 @@ export default function InventoryValueReport() {
                     <thead>
                       <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
                         <th style={{ padding: "8px", textAlign: "left" }}>
-                          Location
-                        </th>
-                        <th style={{ padding: "8px", textAlign: "left" }}>
-                          Vendor
+                          Category
                         </th>
                         <th style={{ padding: "8px", textAlign: "right" }}>
                           Units
@@ -541,25 +474,20 @@ export default function InventoryValueReport() {
                       </tr>
                     </thead>
                     <tbody>
-                      {latestRows.map((row) => (
+                      {categoryBreakdown.map((row) => (
                         <tr
-                          key={row.id}
+                          key={row.category}
                           style={{ borderBottom: "1px solid #f1f1f1" }}
                         >
-                          <td style={{ padding: "8px" }}>
-                            {locationName(row.locationId)}
-                          </td>
-                          <td style={{ padding: "8px" }}>
-                            {row.vendor ?? "(all)"}
+                          <td style={{ padding: "8px" }}>{row.category}</td>
+                          <td style={{ padding: "8px", textAlign: "right" }}>
+                            {row.units.toLocaleString()}
                           </td>
                           <td style={{ padding: "8px", textAlign: "right" }}>
-                            {row.totalUnits}
+                            ${row.cost.toFixed(2)}
                           </td>
                           <td style={{ padding: "8px", textAlign: "right" }}>
-                            ${row.totalCostValue.toFixed(2)}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>
-                            ${row.totalRetailValue.toFixed(2)}
+                            ${row.retail.toFixed(2)}
                           </td>
                         </tr>
                       ))}
@@ -571,13 +499,12 @@ export default function InventoryValueReport() {
           </Layout.Section>
         )}
 
-        {actionData?.snapshots && snapshots.length === 0 && (
+        {actionData?.variantDaySeries && chartPoints.length === 0 && (
           <Layout.Section>
             <Card>
               <BlockStack gap="200" inlineAlign="center">
                 <Text as="p" variant="bodyMd">
-                  No snapshots match the selected filters in this date
-                  range.
+                  No data in the selected date range and filters.
                 </Text>
               </BlockStack>
             </Card>
@@ -592,25 +519,19 @@ export default function InventoryValueReport() {
   );
 }
 
-// ─── Lightweight SVG line chart ────────────────────────────────────────
-// Two lines (cost + retail) on a shared y-axis. Deliberately vanilla
-// SVG — no chart-library dep needed for two curves.
+// ─── Lightweight SVG line chart with a cutover marker ─────────────────
 function LineChart({
   series,
+  cutoverDate,
 }: {
   series: Array<{ date: string; cost: number; retail: number }>;
+  cutoverDate: string | null;
 }) {
   const W = 720;
   const H = 240;
   const PAD = { l: 56, r: 16, t: 16, b: 32 };
-  const inner = {
-    w: W - PAD.l - PAD.r,
-    h: H - PAD.t - PAD.b,
-  };
-  const maxY = Math.max(
-    1,
-    ...series.map((s) => Math.max(s.cost, s.retail)),
-  );
+  const inner = { w: W - PAD.l - PAD.r, h: H - PAD.t - PAD.b };
+  const maxY = Math.max(1, ...series.map((s) => Math.max(s.cost, s.retail)));
   const xStep = series.length > 1 ? inner.w / (series.length - 1) : 0;
   const yScale = (v: number) => PAD.t + inner.h - (v / maxY) * inner.h;
   const xScale = (i: number) => PAD.l + i * xStep;
@@ -624,40 +545,24 @@ function LineChart({
     (maxY * i) / yTicks,
   );
 
+  const cutoverIdx = cutoverDate
+    ? series.findIndex((s) => s.date === cutoverDate)
+    : -1;
+
   return (
     <div style={{ overflowX: "auto" }}>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        width="100%"
-        height={H}
-        role="img"
-        aria-label="Inventory value over time"
-      >
-        {/* y-axis grid + labels */}
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
         {tickValues.map((tv, i) => {
           const y = yScale(tv);
           return (
             <g key={i}>
-              <line
-                x1={PAD.l}
-                x2={W - PAD.r}
-                y1={y}
-                y2={y}
-                stroke="#eef0f2"
-              />
-              <text
-                x={PAD.l - 8}
-                y={y + 4}
-                fontSize={11}
-                fill="#637381"
-                textAnchor="end"
-              >
+              <line x1={PAD.l} x2={W - PAD.r} y1={y} y2={y} stroke="#eef0f2" />
+              <text x={PAD.l - 8} y={y + 4} fontSize={11} fill="#637381" textAnchor="end">
                 ${Math.round(tv).toLocaleString()}
               </text>
             </g>
           );
         })}
-        {/* x-axis labels — first, middle, last */}
         {series.length > 0 &&
           [0, Math.floor(series.length / 2), series.length - 1]
             .filter((i, idx, arr) => arr.indexOf(i) === idx)
@@ -673,13 +578,28 @@ function LineChart({
                 {series[i].date.slice(5)}
               </text>
             ))}
-        {/* Lines */}
-        <path
-          d={path("retail")}
-          fill="none"
-          stroke="#1e88e5"
-          strokeWidth={2}
-        />
+        {cutoverIdx > 0 && (
+          <>
+            <line
+              x1={xScale(cutoverIdx)}
+              x2={xScale(cutoverIdx)}
+              y1={PAD.t}
+              y2={PAD.t + inner.h}
+              stroke="#c9184a"
+              strokeDasharray="3 3"
+              strokeWidth={1}
+            />
+            <text
+              x={xScale(cutoverIdx) + 4}
+              y={PAD.t + 12}
+              fontSize={10}
+              fill="#c9184a"
+            >
+              variant_day starts
+            </text>
+          </>
+        )}
+        <path d={path("retail")} fill="none" stroke="#1e88e5" strokeWidth={2} />
         <path
           d={path("cost")}
           fill="none"
@@ -687,7 +607,6 @@ function LineChart({
           strokeWidth={2}
           strokeDasharray="4 3"
         />
-        {/* Legend */}
         <g transform={`translate(${PAD.l}, ${PAD.t - 2})`}>
           <rect width={12} height={2} y={5} fill="#1e88e5" />
           <text x={18} y={9} fontSize={11} fill="#212b36">
