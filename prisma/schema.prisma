@@ -333,6 +333,11 @@ model ProductBulkActionChange {
 // Nightly snapshot of inventory value at each (shop, location, optional
 // vendor) slice. Required for turnover math (COGS / avg inventory across
 // the period) and for historical stock-on-hand trends.
+// DEPRECATED — kept read-only for the pre-cutover Stocky historical
+// trend (382 days of shop-total cost + retail imported from Stocky's
+// historical_stock_on_hand CSVs). Ongoing snapshots now go into
+// VariantDaySnapshot below, which supports per-variant / per-product
+// / per-category valuation instead of just shop-total rollups.
 model InventoryValueSnapshot {
   id               String   @id @default(cuid())
   shop             String
@@ -347,6 +352,98 @@ model InventoryValueSnapshot {
   @@unique([shop, locationId, vendor, periodEnd])
   @@index([shop, periodEnd])
   @@index([shop, locationId, periodEnd])
+}
+
+// ============================================
+// DEMAND FORECASTING + INVENTORY VALUATION
+// ============================================
+// Nightly per-variant snapshot. Captures on_hand, day's units_sold,
+// AND unit_cost + price AS-OF-THE-DAY (cost and price drift; capturing
+// them at snapshot time is what makes historical valuation possible).
+// One row per variant per day. Idempotent on (shop, date, variantId).
+// on_hand can be negative — Shopify allows overselling; we preserve it
+// so downstream can subtract it as "owed" units in reorder math.
+model VariantDaySnapshot {
+  id                String   @id @default(cuid())
+  shop              String
+  date              DateTime // end-of-day UTC of the represented day
+  shopifyVariantId  String
+  shopifyProductId  String
+  productTitle      String   @default("")
+  productType       String   @default("") // Shopify product_type, drives seasonality category
+  onHand            Int      @default(0) // sum across locations (can be negative)
+  unitsSold         Int      @default(0) // net line items = sales − refunds
+  unitCost          Float    @default(0)
+  price             Float    @default(0)
+  createdAt         DateTime @default(now())
+
+  @@unique([shop, date, shopifyVariantId])
+  @@index([shop, date])
+  @@index([shop, shopifyVariantId])
+  @@index([shop, shopifyProductId])
+}
+
+// Monthly rollup for pre-cutover history. Populated by the one-shot
+// backfill (Shopify GraphQL orders + ShopifyQL inventory analytics).
+// Once daily VariantDaySnapshot rows accumulate for a month, downstream
+// prefers those and this table is just the cold-start scaffold.
+model VariantMonthSnapshot {
+  id                 String   @id @default(cuid())
+  shop               String
+  month              String // "YYYY-MM"
+  shopifyVariantId   String
+  shopifyProductId   String
+  productTitle       String   @default("")
+  productType        String   @default("")
+  unitsSold          Int      @default(0)
+  // Approximate share of days that month with on_hand > 0.
+  // Coded values from the backfill heuristic:
+  //   1.0  = stock at both month start and end
+  //   0.5  = stock at only one endpoint
+  //   0.25 = sold that month despite both endpoints being zero
+  //   0.0  = no stock, no sales
+  inStockFraction    Float    @default(1.0)
+  source             String   @default("approx") // "approx" | "backfilled_daily"
+  createdAt          DateTime @default(now())
+
+  @@unique([shop, month, shopifyVariantId])
+  @@index([shop, month])
+  @@index([shop, shopifyVariantId])
+  @@index([shop, shopifyProductId])
+}
+
+// Per-category monthly seasonality multipliers (12 values, mean ≈ 1.0).
+// "category" is a free-form key — the forecast engine looks up a
+// product's category as ProductForecastConfig.category ?? product.productType.
+// Recompute yearly from availability-corrected demand.
+model SeasonalIndex {
+  id        String   @id @default(cuid())
+  shop      String
+  category  String
+  month     Int // 1..12
+  value     Float    @default(1.0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, category, month])
+  @@index([shop, category])
+}
+
+// Per-product overrides on the global forecast defaults. Everything is
+// optional — unset fields fall back to the engine defaults.
+model ProductForecastConfig {
+  id               String   @id @default(cuid())
+  shop             String
+  shopifyProductId String
+  category         String? // overrides productType for seasonality lookup
+  safetyBuffer     Float? // e.g. 0.25 = +25% cushion on top of forecast
+  growth           Float? // e.g. 0.20 = +20% YoY growth expectation
+  leadTimeDays     Int? // supplier lead time
+  moq              Int? // supplier minimum order quantity
+  casePack         Int? // round suggested_order up to nearest N
+  updatedAt        DateTime @updatedAt
+
+  @@unique([shop, shopifyProductId])
+  @@index([shop])
 }
 
 // ============================================
