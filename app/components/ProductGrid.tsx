@@ -144,6 +144,17 @@ interface ProductGridProps {
    */
   availableVariantBySize?: Map<string, string>;
   onAddCell?: (variantId: string) => void;
+  /**
+   * Turn the grid itself into a vertical scrollbox with this max
+   * height (any CSS length: "600px", "70vh", etc). Needed for
+   * `position: sticky` on thead to actually pin the size columns
+   * — sticky pins to the nearest scroll ancestor, and without this
+   * the outer overflow-x: auto div isn't a vertical scroll
+   * container, so the header scrolls off with page scroll. Callers
+   * that expect page-level scrolling (PO create/detail, Transfer
+   * create, Stock Count) leave this undefined — back-compat.
+   */
+  maxHeight?: string;
 }
 
 const SIZE_ORDER = [
@@ -209,6 +220,7 @@ export function ProductGrid({
   onRemoveRow,
   availableVariantBySize,
   onAddCell,
+  maxHeight,
 }: ProductGridProps) {
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
@@ -285,7 +297,17 @@ export function ProductGrid({
   const minAttr = allowNegative ? undefined : min;
 
   return (
-    <div style={{ overflowX: "auto" }}>
+    <div
+      style={{
+        overflowX: "auto",
+        // Turn the wrapper into a real vertical scroll container so
+        // the thead's `position: sticky` has something to pin to.
+        // Without this the header scrolls off with the page.
+        ...(maxHeight
+          ? { overflowY: "auto", maxHeight }
+          : {}),
+      }}
+    >
       <table
         style={{
           width: "100%",

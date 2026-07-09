@@ -296,6 +296,7 @@ export default function OnHand() {
                   sizeColumns={["XS", "S", "M", "L", "XL", "2XL", "3XL"]}
                   trailingLabel="Row total"
                   readonly
+                  maxHeight="75vh"
                 />
               </div>
             </Card>
