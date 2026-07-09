@@ -106,9 +106,12 @@ export function buildProductsSearchQuery(
   return parts.join(" AND ");
 }
 
-// Cap the walk so a "clear all filters" query on a large shop can't
-// hang for minutes. Truncation is surfaced in the return value.
-const MAX_PRODUCTS_PER_QUERY = 500;
+// Backstop only — Shopify's own pagination + throttle limits govern
+// how far the walk goes in practice. The cap here is high enough to
+// cover essentially any real shop's active catalog; if it ever fires,
+// the truncation banner tells the user to filter down. Bumped from
+// 500 to 5000 after the initial cap turned out to be too tight.
+const MAX_PRODUCTS_PER_QUERY = 5000;
 
 export async function fetchOnHandAtLocation(
   admin: AdminApiContext,

@@ -158,8 +158,8 @@ export default function OnHand() {
         {summary?.truncated && (
           <Layout.Section>
             <Banner tone="warning">
-              Result truncated at 500 products. Narrow the search or add
-              a tag filter to see everything.
+              Result truncated at 5,000 products — if you're hitting
+              this, add a tag or search filter to narrow down.
             </Banner>
           </Layout.Section>
         )}
