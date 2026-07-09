@@ -208,6 +208,72 @@ export async function getVendors(
   }
 }
 
+// Shop-wide tag connection — mirrors getVendors but for productTags.
+const PRODUCT_TAGS_QUERY = `#graphql
+  query GetProductTags($first: Int!, $after: String) {
+    shop {
+      productTags(first: $first, after: $after) {
+        edges { node }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+`;
+
+export async function getProductTags(
+  admin: AdminApiContext,
+  shop?: string,
+): Promise<string[]> {
+  const fetcher = async (): Promise<string[]> => {
+    const tags: string[] = [];
+    let after: string | null = null;
+    let hasNext = true;
+    while (hasNext) {
+      const response = await admin.graphql(PRODUCT_TAGS_QUERY, {
+        variables: { first: 250, after },
+      });
+      const body = (await response.json()) as {
+        data?: {
+          shop?: {
+            productTags?: {
+              edges?: Array<{ node: string }>;
+              pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+            };
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      if (body.errors && body.errors.length > 0) {
+        console.error("[getProductTags] errors:", body.errors.map((e) => e.message).join("; "));
+        break;
+      }
+      const pt = body.data?.shop?.productTags;
+      if (!pt) break;
+      for (const edge of pt.edges ?? []) {
+        if (edge?.node) tags.push(edge.node);
+      }
+      hasNext = pt.pageInfo?.hasNextPage ?? false;
+      after = pt.pageInfo?.endCursor ?? null;
+    }
+    return [...new Set(tags)].filter(Boolean).sort();
+  };
+
+  if (shop) {
+    try {
+      return await getCached(shop, CACHE_KEYS.PRODUCT_TAGS, CACHE_TTL.PRODUCT_TAGS, fetcher);
+    } catch (error) {
+      console.error("Failed to fetch tags (cached):", error);
+      return [];
+    }
+  }
+  try {
+    return await fetcher();
+  } catch (error) {
+    console.error("Failed to fetch tags:", error);
+    return [];
+  }
+}
+
 // Fetch available sales channels / publications
 const PUBLICATIONS_QUERY = `#graphql
   query GetPublications($first: Int!) {

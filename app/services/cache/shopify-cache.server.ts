@@ -56,6 +56,7 @@ export const CACHE_TTL = {
   // isn't showing up yet" is a high-friction failure mode. 15 min is a
   // reasonable compromise vs. fetching on every page load.
   VENDORS: 15,
+  PRODUCT_TAGS: 15,
   OPTION_VALUES: 15,
   PUBLICATIONS: 60 * 12, // rarely changes
   METAFIELD_DEFINITIONS: 60 * 12,
@@ -65,6 +66,7 @@ export const CACHE_TTL = {
 /** Standard cache keys — using constants keeps usages consistent */
 export const CACHE_KEYS = {
   VENDORS: "vendors",
+  PRODUCT_TAGS: "product_tags",
   PUBLICATIONS: "publications",
   METAFIELD_DEFINITIONS: "metafield_definitions",
   LOCATIONS: "locations",
