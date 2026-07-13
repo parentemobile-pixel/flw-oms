@@ -545,8 +545,12 @@ export default function Replenishment() {
       const key = rowCells[0] ? rowKeyFor(rowCells[0]) : "";
       const box = boxByRowKey[key] ?? 1;
       return (
+        // Box + note badge in a fixed-width column so the trailing
+        // cell doesn't wobble as the note text length changes across
+        // rows. min-width keeps it readable on narrow screens.
+        <div style={{ minWidth: "160px" }}>
         <BlockStack gap="100" align="end">
-          <div style={{ width: "60px" }}>
+          <div style={{ width: "90px" }}>
             <TextField
               label="Box"
               labelHidden
@@ -563,6 +567,7 @@ export default function Replenishment() {
           </div>
           <NoteBadge note={note} />
         </BlockStack>
+        </div>
       );
     },
     [rowByVariantId, rowKeyFor, boxByRowKey],
@@ -936,6 +941,8 @@ export default function Replenishment() {
                   getCellSubtext={getCellSubtext}
                   trailingLabel="Note"
                   renderRowTrailing={renderRowTrailing}
+                  stickyLeadColumn
+                  maxHeight="75vh"
                   onRemoveRow={(variantIds) => {
                     // Drop the variant ids from the working set so the
                     // row vanishes immediately and won't be considered

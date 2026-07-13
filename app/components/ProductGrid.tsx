@@ -155,6 +155,14 @@ interface ProductGridProps {
    * create, Stock Count) leave this undefined — back-compat.
    */
   maxHeight?: string;
+  /**
+   * Pin the leftmost (Product / Variant) column so it stays visible
+   * as the user scrolls horizontally through the size columns.
+   * Useful on narrow screens where the size columns push the table
+   * wider than the viewport. Callers that don't want the extra
+   * stacking-context complexity leave it off. Defaults to false.
+   */
+  stickyLeadColumn?: boolean;
 }
 
 const SIZE_ORDER = [
@@ -221,7 +229,17 @@ export function ProductGrid({
   availableVariantBySize,
   onAddCell,
   maxHeight,
+  stickyLeadColumn = false,
 }: ProductGridProps) {
+  // Styles for the pinned product column. thead cell gets a higher
+  // z-index than tbody so the top-left corner wins in both directions
+  // when both sticky-top and sticky-left are active.
+  const leadTh: CSSProperties = stickyLeadColumn
+    ? { position: "sticky", left: 0, zIndex: 3, background: "#fff" }
+    : {};
+  const leadTd: CSSProperties = stickyLeadColumn
+    ? { position: "sticky", left: 0, zIndex: 1, background: "#fff" }
+    : {};
   const { rows, sizes } = useMemo(() => {
     const sizeSet = new Set<string>();
     const groups: Record<string, GroupedRow> = {};
@@ -328,7 +346,15 @@ export function ProductGrid({
           }}
         >
           <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-            <th style={{ padding: "8px", textAlign: "left", minWidth: "200px" }}>
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "left",
+                minWidth: "240px",
+                borderBottom: "2px solid #e1e3e5",
+                ...leadTh,
+              }}
+            >
               Product / Variant
             </th>
             {showColumns.cost && (
@@ -411,6 +437,13 @@ export function ProductGrid({
                       textTransform: "uppercase",
                       letterSpacing: "0.04em",
                       color: "#4a4a4a",
+                      // Group header spans all columns, but the pinned
+                      // lead column would otherwise show white through
+                      // it. Match the row background so the pin is
+                      // invisible on group-header rows.
+                      ...(stickyLeadColumn
+                        ? { background: "#f6f6f7", position: "sticky", left: 0, zIndex: 1 }
+                        : {}),
                     }}
                   >
                     {groupLabel}
@@ -418,8 +451,18 @@ export function ProductGrid({
                 </tr>
               )}
               <tr style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td style={{ padding: "8px", fontWeight: 500 }}>
-                  <InlineStack gap="100" blockAlign="center">
+                <td
+                  style={{
+                    padding: "8px",
+                    fontWeight: 500,
+                    // Let long titles wrap onto a second line rather
+                    // than stretching the column past its min-width.
+                    wordBreak: "break-word",
+                    borderBottom: "1px solid #f1f1f1",
+                    ...leadTd,
+                  }}
+                >
+                  <InlineStack gap="100" blockAlign="center" wrap>
                     {onRemoveRow && (
                       // Drop every variantId in this row in one shot —
                       // the parent owns the row state, we just tell it
