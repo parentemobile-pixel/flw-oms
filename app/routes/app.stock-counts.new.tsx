@@ -19,6 +19,7 @@ import {
   InlineStack,
   Autocomplete,
   Icon,
+  Checkbox,
 } from "@shopify/polaris";
 import { SearchIcon } from "@shopify/polaris-icons";
 
@@ -53,6 +54,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const name = String(formData.get("name") ?? "").trim();
   const vendorFilter =
     (formData.get("vendorFilter") as string | null) || null;
+  const includeZeroStock = formData.get("includeZeroStock") === "1";
 
   if (!locationId || !name) {
     return json({ error: "Location and name are required." });
@@ -63,6 +65,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       locationId,
       name,
       vendorFilter: vendorFilter || null,
+      includeZeroStock,
     });
     throw redirect(`/app/stock-counts/${sc.id}`);
   } catch (error) {
@@ -87,6 +90,7 @@ export default function NewStockCount() {
   );
   const [vendorInput, setVendorInput] = useState("");
   const [vendorFilter, setVendorFilter] = useState("");
+  const [includeZeroStock, setIncludeZeroStock] = useState(false);
 
   const vendorOptions = vendors
     .filter(
@@ -100,6 +104,7 @@ export default function NewStockCount() {
     if (locationId) fd.set("locationId", locationId);
     fd.set("name", name);
     if (vendorFilter) fd.set("vendorFilter", vendorFilter);
+    if (includeZeroStock) fd.set("includeZeroStock", "1");
     submit(fd, { method: "post" });
   };
 
@@ -118,10 +123,11 @@ export default function NewStockCount() {
           <Card>
             <BlockStack gap="400">
               <Text as="p" variant="bodyMd" tone="subdued">
-                This seeds a count with every variant at the selected
-                location. Expected quantities are snapshotted now. You can
-                count any subset — anything you don't count is left alone in
-                Shopify.
+                Seeds a count with variants Shopify says are IN STOCK at
+                this location. Anything uncounted at the end is
+                effectively phantom stock — "Shopify thinks it's here,
+                nobody could find it." You can zero those out during the
+                Complete step. Expected quantities are snapshotted now.
               </Text>
               <TextField
                 label="Count name"
@@ -159,6 +165,12 @@ export default function NewStockCount() {
                     prefix={<Icon source={SearchIcon} />}
                   />
                 }
+              />
+              <Checkbox
+                label="Include zero-stock variants"
+                helpText="Off by default. Turn on to also seed variants Shopify says have 0 available here — useful for reconciling slow movers you know are on the shelf."
+                checked={includeZeroStock}
+                onChange={setIncludeZeroStock}
               />
             </BlockStack>
           </Card>

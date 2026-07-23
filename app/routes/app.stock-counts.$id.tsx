@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import {
@@ -24,6 +24,8 @@ import {
   Divider,
   Select,
   Icon,
+  Modal,
+  Checkbox,
 } from "@shopify/polaris";
 import { SearchIcon } from "@shopify/polaris-icons";
 
@@ -32,9 +34,11 @@ import {
   abandonStockCount,
   completeStockCount,
   findLineByCode,
+  getPreviouslyCountedAtMap,
   getStockCount,
   incrementCount,
   recordCount,
+  saveDraftQuantities,
   saveRowCounts,
 } from "../services/stock-counts/stock-count-service.server";
 import { getLocations } from "../services/shopify-api/locations.server";
@@ -48,7 +52,28 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const locations = await getLocations(admin, session.shop).catch(() => []);
   const locationName =
     locations.find((l) => l.id === sc.locationId)?.name ?? sc.locationId;
-  return json({ sc, locationName });
+
+  // Location-scoped prior-count history for every variant in this
+  // count. Powers the "Last counted N days ago" row subtext.
+  const variantIds = sc.lineItems.map((li) => li.shopifyVariantId);
+  const priorMap = await getPreviouslyCountedAtMap(
+    session.shop,
+    sc.locationId,
+    variantIds,
+    sc.id,
+  );
+  const previouslyCountedAt: Record<
+    string,
+    { countedAt: string; countName: string }
+  > = {};
+  for (const [variantId, entry] of priorMap.entries()) {
+    previouslyCountedAt[variantId] = {
+      countedAt: entry.countedAt.toISOString(),
+      countName: entry.countName,
+    };
+  }
+
+  return json({ sc, locationName, previouslyCountedAt });
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
@@ -87,6 +112,25 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       await saveRowCounts(id, entries);
       return json({ ok: true as const, savedRow: true as const });
     }
+    if (intent === "save-draft") {
+      // Debounced autosave of typed values. Persists to draftQuantity
+      // (NOT countedQuantity) so navigation-away doesn't lose them,
+      // but the count itself isn't committed until Save Row.
+      const raw = String(formData.get("entries") ?? "[]");
+      type DraftEntry = {
+        lineItemId: string;
+        draftQuantity: number | null;
+        clientEditedAt: number;
+      };
+      let entries: DraftEntry[] = [];
+      try {
+        entries = JSON.parse(raw) as DraftEntry[];
+      } catch {
+        return json({ error: "Bad save-draft payload" }, { status: 400 });
+      }
+      await saveDraftQuantities(id, entries);
+      return json({ ok: true as const, savedDraft: true as const });
+    }
     if (intent === "scan") {
       const code = String(formData.get("code"));
       const lineItemId = await findLineByCode(id, code);
@@ -106,7 +150,23 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       });
     }
     if (intent === "complete") {
-      const result = await completeStockCount(admin, session.shop, id);
+      // Optional zeroOutIds — checked lines from the Complete modal
+      // whose "uncounted" state should apply as countedQuantity=0.
+      const zeroRaw = String(formData.get("zeroOutIds") ?? "[]");
+      let zeroOutLineItemIds: string[] = [];
+      try {
+        const parsed = JSON.parse(zeroRaw);
+        if (Array.isArray(parsed)) {
+          zeroOutLineItemIds = parsed.filter(
+            (x): x is string => typeof x === "string",
+          );
+        }
+      } catch {
+        // Bad payload → treat as no zero-out (silent, safer than throwing)
+      }
+      const result = await completeStockCount(admin, session.shop, id, {
+        zeroOutLineItemIds,
+      });
       return json({ ok: true as const, completed: result });
     }
     if (intent === "abandon") {
@@ -132,7 +192,8 @@ const STATUS_TONES: Record<
 type Sort = "vendor" | "product";
 
 export default function StockCountDetail() {
-  const { sc, locationName } = useLoaderData<typeof loader>();
+  const { sc, locationName, previouslyCountedAt } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const fetcher = useFetcher<typeof action>();
@@ -140,22 +201,31 @@ export default function StockCountDetail() {
   const revalidator = useRevalidator();
   const isBusy = navigation.state === "submitting";
 
-  // Drafts vs saved — core of the "count row-by-row" UX.
-  //   drafts[id] = what's currently shown in the cell. Always a number;
-  //     seeded from countedQuantity ?? expectedQuantity so the user
-  //     starts with Shopify's current stock as the baseline.
-  //   saved[id]  = countedQuantity from the server. null = not saved
-  //     yet (row still "to be counted"); number = row was confirmed.
+  // Three-tier value model:
+  //   drafts[id] = what's currently shown in the cell. Autosaved to
+  //     server on debounce, so navigation-away doesn't lose it.
+  //   saved[id]  = countedQuantity — the OFFICIAL count, only written
+  //     by Save Row. Null = row still "to be counted".
+  //   Persisted draftQuantity (from li.draftQuantity) hydrates drafts
+  //     on mount so a user can leave and come back to their typing.
   const [drafts, setDrafts] = useState<Record<string, number>>(() => {
     const init: Record<string, number> = {};
     for (const li of sc.lineItems) {
-      init[li.id] = li.countedQuantity ?? li.expectedQuantity;
+      init[li.id] =
+        li.draftQuantity ?? li.countedQuantity ?? li.expectedQuantity;
     }
     return init;
   });
   const saved: Record<string, number | null> = useMemo(() => {
     const m: Record<string, number | null> = {};
     for (const li of sc.lineItems) m[li.id] = li.countedQuantity;
+    return m;
+  }, [sc.lineItems]);
+  // Map of DB draftQuantity per line, used by the visual-state helpers
+  // (row is in "Draft" state when a draftQuantity exists but no count).
+  const persistedDrafts: Record<string, number | null> = useMemo(() => {
+    const m: Record<string, number | null> = {};
+    for (const li of sc.lineItems) m[li.id] = li.draftQuantity;
     return m;
   }, [sc.lineItems]);
 
@@ -197,7 +267,8 @@ export default function StockCountDetail() {
       let added = false;
       for (const li of sc.lineItems) {
         if (!(li.id in next)) {
-          next[li.id] = li.countedQuantity ?? li.expectedQuantity;
+          next[li.id] =
+            li.draftQuantity ?? li.countedQuantity ?? li.expectedQuantity;
           added = true;
         }
       }
@@ -205,16 +276,65 @@ export default function StockCountDetail() {
     });
   }, [sc.lineItems]);
 
+  // Debounced autosave of typed drafts to server draftQuantity so they
+  // survive navigation away. pendingRef holds line-items awaiting a
+  // flush; timerRef holds the debounce timeout. flush() is safe to
+  // call at any time — it clears the timer and POSTs whatever's pending.
+  const draftFetcher = useFetcher<typeof action>();
+  const pendingRef = useRef<Map<string, number | null>>(new Map());
+  const timerRef = useRef<number | null>(null);
+
+  const flush = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (pendingRef.current.size === 0) return;
+    const entries = Array.from(pendingRef.current.entries()).map(
+      ([lineItemId, draftQuantity]) => ({
+        lineItemId,
+        draftQuantity,
+        clientEditedAt: Date.now(),
+      }),
+    );
+    pendingRef.current.clear();
+    const fd = new FormData();
+    fd.set("intent", "save-draft");
+    fd.set("entries", JSON.stringify(entries));
+    draftFetcher.submit(fd, { method: "post" });
+  }, [draftFetcher]);
+
+  const scheduleFlush = useCallback(() => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(flush, 500);
+  }, [flush]);
+
+  // Unmount: fire any pending draft POST so a tab-close mid-typing
+  // doesn't lose the last edits.
+  useEffect(() => {
+    return () => {
+      flush();
+    };
+  }, [flush]);
+
+  // Tab close / hard refresh path — debounce timer would otherwise
+  // never fire. The browser gives us one last shot in beforeunload.
+  useEffect(() => {
+    const onBeforeUnload = () => flush();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [flush]);
+
   const handleCellChange = useCallback(
     (variantId: string, raw: number) => {
       const li = byVariantId.get(variantId);
       if (!li) return;
       const safe = Math.max(0, Math.floor(raw));
-      // Update draft only — nothing hits the DB until the user clicks
-      // "Save row" (or scans, which is treated as implicit confirm).
       setDrafts((prev) => ({ ...prev, [li.id]: safe }));
+      pendingRef.current.set(li.id, safe);
+      scheduleFlush();
     },
-    [byVariantId],
+    [byVariantId, scheduleFlush],
   );
 
   // Row confirm: walk every cell in the row (including overflow sizes)
@@ -234,6 +354,14 @@ export default function StockCountDetail() {
         })
         .filter((e): e is NonNullable<typeof e> => e !== null);
       if (entries.length === 0) return;
+      // Drop any pending draft POSTs for these lines — Save Row will
+      // clear draftQuantity server-side, and a slow in-flight draft
+      // POST arriving after Save Row would leave a ghost draft.
+      for (const e of entries) pendingRef.current.delete(e.lineItemId);
+      if (timerRef.current !== null && pendingRef.current.size === 0) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
       const fd = new FormData();
       fd.set("intent", "save-row");
       fd.set("entries", JSON.stringify(entries));
@@ -268,6 +396,9 @@ export default function StockCountDetail() {
         // revalidator catches up.
         const serverNext = (li.countedQuantity ?? 0) + 1;
         setDrafts((prev) => ({ ...prev, [li.id]: serverNext }));
+        // Discard any pending draft for this line — a slow draft POST
+        // could otherwise stomp the scan-committed count.
+        pendingRef.current.delete(li.id);
         setScanFeedback({
           message: `✓ ${li.productTitle} — ${li.variantTitle}: counted ${serverNext}`,
           tone: "success",
@@ -295,17 +426,41 @@ export default function StockCountDetail() {
     }
   }, [saveRowFetcher.state, saveRowFetcher.data, revalidator]);
 
+  // Complete modal — replaces the old window.confirm gate. Opens a
+  // scrollable checklist of uncounted lines so the user can decide
+  // which to reconcile as phantom stock (adjust to 0) as part of the
+  // apply. Reuses the same "complete" server intent with an optional
+  // zeroOutIds payload.
+  const [completeOpen, setCompleteOpen] = useState(false);
+  const [zeroChecked, setZeroChecked] = useState<Set<string>>(() => new Set());
+  const completeFetcher = useFetcher<typeof action>();
+
   const handleComplete = useCallback(() => {
-    if (
-      !window.confirm(
-        "Complete this count? This will reconcile Shopify inventory with your counts.",
-      )
-    )
-      return;
+    // Force-flush pending drafts synchronously so the "uncounted" list
+    // in the modal reflects the latest saved state.
+    flush();
+    setZeroChecked(new Set());
+    setCompleteOpen(true);
+  }, [flush]);
+
+  const handleSubmitComplete = useCallback(() => {
     const fd = new FormData();
     fd.set("intent", "complete");
-    submit(fd, { method: "post" });
-  }, [submit]);
+    fd.set("zeroOutIds", JSON.stringify(Array.from(zeroChecked)));
+    completeFetcher.submit(fd, { method: "post" });
+  }, [zeroChecked, completeFetcher]);
+
+  // Close modal on successful complete.
+  useEffect(() => {
+    if (
+      completeFetcher.state === "idle" &&
+      completeFetcher.data &&
+      "completed" in completeFetcher.data
+    ) {
+      setCompleteOpen(false);
+      revalidator.revalidate();
+    }
+  }, [completeFetcher.state, completeFetcher.data, revalidator]);
 
   const handleAbandon = useCallback(() => {
     if (!window.confirm("Abandon this count? No inventory changes.")) return;
@@ -388,9 +543,31 @@ export default function StockCountDetail() {
       ? (actionData.completed as {
           sessionId: string;
           applied: number;
+          zeroed: number;
           uncounted: number;
         })
       : null;
+
+  // Small relative-time helper for the row subtext. No dependency — a
+  // ~5-line implementation covers the useful ranges (min / hour / day
+  // / week / month / year). Renders "just now" for < 1 min.
+  const relativeTime = useCallback((isoOrDate: string | Date): string => {
+    const t = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
+    const diffSec = Math.max(0, (Date.now() - t.getTime()) / 1000);
+    if (diffSec < 60) return "just now";
+    const mins = Math.floor(diffSec / 60);
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours} hr ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days} day${days === 1 ? "" : "s"} ago`;
+    const weeks = Math.floor(days / 7);
+    if (weeks < 5) return `${weeks} week${weeks === 1 ? "" : "s"} ago`;
+    const months = Math.floor(days / 30);
+    if (months < 12) return `${months} month${months === 1 ? "" : "s"} ago`;
+    const years = Math.floor(days / 365);
+    return `${years} year${years === 1 ? "" : "s"} ago`;
+  }, []);
 
   // Vendor grouping header for the grid. Only active when sort=vendor.
   // Memoize the productId → vendor map so ProductGrid's groupBy stays
@@ -410,14 +587,25 @@ export default function StockCountDetail() {
           vendorByProduct.get(row.productId) ?? "Unknown vendor"
       : undefined;
 
-  // Cells are green once their row has been saved. Drafts (edits the
-  // user has typed but not confirmed yet) show neutral — nothing is
-  // "counted" until Save row.
+  // Cell coloring reflects state:
+  //   green   = saved (countedQuantity written)
+  //   yellow  = draft only (draftQuantity present, no count yet)
+  //   neutral = untouched
   const variantIdToLineItem = useMemo(() => byVariantId, [byVariantId]);
   const getCellStyle = (cell: GridCell) => {
     const li = variantIdToLineItem.get(cell.variantId);
-    if (li && saved[li.id] !== null) {
+    if (!li) return undefined;
+    if (saved[li.id] !== null) {
       return { background: "#e7f5ec", boxShadow: "inset 0 0 0 1px #8fd19e" };
+    }
+    // Draft-only if we have a value that's not the initial expected qty
+    // OR the DB persisted a draftQuantity for the line.
+    const draft = drafts[li.id];
+    const isDraft =
+      persistedDrafts[li.id] !== null ||
+      (draft !== undefined && draft !== li.expectedQuantity);
+    if (isDraft) {
+      return { background: "#fff8dc", boxShadow: "inset 0 0 0 1px #e6cf7a" };
     }
     return undefined;
   };
@@ -443,11 +631,19 @@ export default function StockCountDetail() {
             <Banner tone="success" title="Count complete">
               Applied {completedResult.applied} adjustment
               {completedResult.applied !== 1 ? "s" : ""} to Shopify.
+              {completedResult.zeroed > 0 && (
+                <>
+                  {" "}
+                  Zeroed out {completedResult.zeroed} uncounted line
+                  {completedResult.zeroed !== 1 ? "s" : ""} as phantom stock.
+                </>
+              )}
               {completedResult.uncounted > 0 && (
                 <>
                   {" "}
-                  {completedResult.uncounted} line(s) were not counted and
-                  were left unchanged (likely dead SKUs).
+                  {completedResult.uncounted} line
+                  {completedResult.uncounted !== 1 ? "s" : ""} were not
+                  counted and were left unchanged.
                 </>
               )}
             </Banner>
@@ -580,9 +776,6 @@ export default function StockCountDetail() {
                 readonly={!isActive}
                 trailingLabel="Status"
                 renderRowTrailing={({ cells: rowCells }) => {
-                  // Row state: all cells saved → Counted; none → Not
-                  // counted; mixed → Partial (rare, only if saved data
-                  // came from an older partial-save flow).
                   const rowLineItems = rowCells
                     .map((c) => byVariantId.get(c.variantId))
                     .filter((li): li is NonNullable<typeof li> => !!li);
@@ -590,41 +783,112 @@ export default function StockCountDetail() {
                   const savedCount = rowLineItems.filter(
                     (li) => saved[li.id] !== null,
                   ).length;
-                  const allSaved = total > 0 && savedCount === total;
-                  // Row is "dirty" if any draft differs from its saved
-                  // value — user has edits they haven't confirmed yet.
+                  // dirty = at least one saved line has a draft that
+                  // differs from its committed count (user typed after
+                  // saving and hasn't re-saved).
                   const dirty = rowLineItems.some(
                     (li) =>
                       saved[li.id] !== null &&
                       drafts[li.id] !== saved[li.id],
                   );
-                  // A global "any row saving" flag is fine here — users
-                  // save one row at a time, so per-row busy tracking isn't
-                  // worth the fragile formData comparison.
+                  // anyDraftNoSave = at least one unsaved line has a
+                  // non-baseline draft (typed but never Save-Row'd).
+                  const anyDraftNoSave = rowLineItems.some(
+                    (li) =>
+                      saved[li.id] === null &&
+                      (persistedDrafts[li.id] !== null ||
+                        drafts[li.id] !== li.expectedQuantity),
+                  );
                   const isRowBusy = saveRowFetcher.state !== "idle";
+
+                  // 5-state badge + button matrix.
+                  let badgeTone:
+                    | "success"
+                    | "warning"
+                    | "info"
+                    | "attention"
+                    | undefined = undefined;
+                  let badgeText = "Not counted";
+                  let buttonLabel = "Save row";
+                  let buttonVariant: "primary" | undefined = undefined;
+
+                  if (dirty && savedCount > 0) {
+                    badgeTone = "warning";
+                    badgeText = "Unsaved changes";
+                    buttonLabel = "Save changes";
+                    buttonVariant = "primary";
+                  } else if (!dirty && savedCount === total && total > 0) {
+                    badgeTone = "success";
+                    badgeText = "Counted";
+                    buttonLabel = "Re-save";
+                    buttonVariant = undefined;
+                  } else if (
+                    !dirty &&
+                    savedCount === 0 &&
+                    anyDraftNoSave
+                  ) {
+                    badgeTone = "info";
+                    badgeText = "Draft";
+                    buttonLabel = "Save row";
+                    buttonVariant = "primary";
+                  } else if (!dirty && savedCount > 0 && savedCount < total) {
+                    badgeTone = "attention";
+                    badgeText = `${savedCount} of ${total} saved`;
+                    buttonLabel = "Save row";
+                    buttonVariant = "primary";
+                  }
+
+                  // Subtext: freshest counted timestamp in this row, or
+                  // else the freshest prior-count history across the
+                  // variants in this row.
+                  const freshestCountedAt = rowLineItems
+                    .map((li) => li.countedAt)
+                    .filter((d): d is Date | string => !!d)
+                    .map((d) => new Date(d as string | Date).getTime())
+                    .reduce<number | null>(
+                      (acc, t) => (acc === null || t > acc ? t : acc),
+                      null,
+                    );
+                  let subtext: string | null = null;
+                  if (freshestCountedAt !== null) {
+                    subtext = `Counted ${relativeTime(new Date(freshestCountedAt))}`;
+                  } else {
+                    // Find the freshest previouslyCountedAt across the
+                    // variants in this row.
+                    let bestT = 0;
+                    let bestName = "";
+                    for (const li of rowLineItems) {
+                      const prev = previouslyCountedAt[li.shopifyVariantId];
+                      if (!prev) continue;
+                      const t = new Date(prev.countedAt).getTime();
+                      if (t > bestT) {
+                        bestT = t;
+                        bestName = prev.countName;
+                      }
+                    }
+                    if (bestT > 0) {
+                      subtext = `Last counted ${relativeTime(
+                        new Date(bestT),
+                      )}${bestName ? ` in ${bestName}` : ""}`;
+                    }
+                  }
+
                   return (
                     <BlockStack gap="100" inlineAlign="end">
-                      {allSaved && !dirty ? (
-                        <Badge tone="success">Counted</Badge>
-                      ) : savedCount > 0 ? (
-                        <Badge tone="attention">
-                          {`${savedCount} of ${total} saved`}
-                        </Badge>
-                      ) : (
-                        <Badge>Not counted</Badge>
+                      <Badge tone={badgeTone}>{badgeText}</Badge>
+                      {subtext && (
+                        <Text as="span" variant="bodySm" tone="subdued">
+                          {subtext}
+                        </Text>
                       )}
                       {isActive && (
                         <Button
                           size="slim"
                           onClick={() => handleSaveRow(rowCells)}
                           loading={isRowBusy}
-                          variant={allSaved && !dirty ? undefined : "primary"}
+                          variant={buttonVariant}
                         >
-                          {allSaved && !dirty
-                            ? "Re-save"
-                            : dirty
-                              ? "Save changes"
-                              : "Save row"}
+                          {buttonLabel}
                         </Button>
                       )}
                     </BlockStack>
@@ -641,8 +905,9 @@ export default function StockCountDetail() {
             <Card>
               <InlineStack align="space-between" blockAlign="center">
                 <Text as="p" variant="bodyMd">
-                  When you're done, <strong>Complete</strong> syncs counted
-                  quantities to Shopify. Uncounted lines are untouched.
+                  When you're done, <strong>Complete</strong> reconciles
+                  Shopify with your counts. You'll get a chance to
+                  review uncounted lines (phantom stock) first.
                 </Text>
                 <ButtonGroup>
                   <Button
@@ -656,7 +921,7 @@ export default function StockCountDetail() {
                     variant="primary"
                     onClick={handleComplete}
                     loading={isBusy}
-                    disabled={counted === 0}
+                    disabled={sc.lineItems.length === 0}
                   >
                     Complete ({counted} counted)
                   </Button>
@@ -669,6 +934,146 @@ export default function StockCountDetail() {
           <div style={{ height: "3rem" }} />
         </Layout.Section>
       </Layout>
+
+      {/* Complete modal — selective phantom-stock reconciliation */}
+      <Modal
+        open={completeOpen}
+        onClose={() => setCompleteOpen(false)}
+        title="Complete stock count"
+        primaryAction={{
+          content: `Apply — count ${counted}, zero out ${zeroChecked.size}`,
+          onAction: handleSubmitComplete,
+          loading: completeFetcher.state !== "idle",
+        }}
+        secondaryActions={[
+          {
+            content: "Cancel",
+            onAction: () => setCompleteOpen(false),
+            disabled: completeFetcher.state !== "idle",
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <Text as="p" variant="bodyMd">
+              <strong>{counted}</strong> of {sc.lineItems.length} lines
+              counted. <strong>{sc.lineItems.length - counted}</strong>{" "}
+              line{sc.lineItems.length - counted === 1 ? "" : "s"} were
+              not counted.
+            </Text>
+            {sc.lineItems.length - counted > 0 && (
+              <>
+                <Banner tone="info">
+                  Uncounted lines are variants Shopify thinks you have here
+                  that nobody found. Check any you want to reconcile as
+                  phantom stock — checked lines will be adjusted to 0 in
+                  Shopify as part of applying the count.
+                </Banner>
+                <InlineStack gap="200">
+                  <Button
+                    size="slim"
+                    onClick={() =>
+                      setZeroChecked(
+                        new Set(
+                          sc.lineItems
+                            .filter((li) => saved[li.id] === null)
+                            .map((li) => li.id),
+                        ),
+                      )
+                    }
+                  >
+                    Select all uncounted
+                  </Button>
+                  <Button
+                    size="slim"
+                    onClick={() => setZeroChecked(new Set())}
+                    disabled={zeroChecked.size === 0}
+                  >
+                    Clear
+                  </Button>
+                </InlineStack>
+                <div
+                  style={{
+                    maxHeight: "360px",
+                    overflowY: "auto",
+                    border: "1px solid #e1e3e5",
+                    borderRadius: "6px",
+                    padding: "8px 12px",
+                  }}
+                >
+                  <BlockStack gap="150">
+                    {sc.lineItems
+                      .filter((li) => saved[li.id] === null)
+                      .sort((a, b) => {
+                        const va = (a.vendor ?? "zzz").toLowerCase();
+                        const vb = (b.vendor ?? "zzz").toLowerCase();
+                        if (va !== vb) return va.localeCompare(vb);
+                        const pa = a.productTitle.toLowerCase();
+                        const pb = b.productTitle.toLowerCase();
+                        if (pa !== pb) return pa.localeCompare(pb);
+                        return a.variantTitle.localeCompare(b.variantTitle);
+                      })
+                      .map((li) => {
+                        const draft = li.draftQuantity;
+                        return (
+                          <InlineStack
+                            key={li.id}
+                            gap="200"
+                            blockAlign="start"
+                            wrap={false}
+                          >
+                            <Checkbox
+                              label=""
+                              labelHidden
+                              checked={zeroChecked.has(li.id)}
+                              onChange={(next) => {
+                                setZeroChecked((prev) => {
+                                  const s = new Set(prev);
+                                  if (next) s.add(li.id);
+                                  else s.delete(li.id);
+                                  return s;
+                                });
+                              }}
+                            />
+                            <BlockStack gap="050">
+                              <Text as="span" variant="bodyMd">
+                                {li.productTitle}
+                                {" — "}
+                                <Text as="span" tone="subdued">
+                                  {li.variantTitle}
+                                </Text>
+                              </Text>
+                              <Text
+                                as="span"
+                                variant="bodySm"
+                                tone="subdued"
+                              >
+                                Expected: {li.expectedQuantity}
+                                {draft != null && (
+                                  <>
+                                    {" · "}Draft was: {draft} (will be
+                                    discarded)
+                                  </>
+                                )}
+                                {li.vendor && <> · {li.vendor}</>}
+                              </Text>
+                            </BlockStack>
+                          </InlineStack>
+                        );
+                      })}
+                  </BlockStack>
+                </div>
+              </>
+            )}
+            {completeFetcher.data &&
+              "error" in completeFetcher.data && (
+                <Banner tone="critical">
+                  {String(completeFetcher.data.error)}
+                </Banner>
+              )}
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
     </Page>
   );
 }
