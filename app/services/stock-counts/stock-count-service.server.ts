@@ -25,6 +25,14 @@ export async function createStockCount(
     name: string;
     /** If set, only seed variants from products matching this vendor. */
     vendorFilter?: string | null;
+    /**
+     * When false (default), only seed variants with `available > 0`
+     * at this location. That way uncounted lines at completion are
+     * genuine phantom stock ("we thought we had it, but it's not on
+     * the shelf"). Pass `true` to include zero-stock variants — for
+     * counts where you specifically want to reconcile slow movers.
+     */
+    includeZeroStock?: boolean;
   },
 ) {
   const allProducts: Array<{
@@ -123,13 +131,18 @@ export async function createStockCount(
     variants.map((v) => v.variantId),
   );
 
-  // Only seed variants that have an inventoryLevel at this location (even if 0)
+  // Default seed: variants Shopify says have stock at this location
+  // (available > 0). This makes uncounted rows at Complete = phantom
+  // stock. `includeZeroStock` opens the seed to zero-stock variants
+  // for edge cases (reconciling slow movers you know were on shelf).
   const lineItems = variants
     .map((v) => {
       const inv = invMap.get(v.variantId);
       if (!inv) return null;
       const level = inv.levels.find((l) => l.locationId === params.locationId);
       if (!level) return null;
+      const available = level.quantities.available ?? 0;
+      if (!params.includeZeroStock && available <= 0) return null;
       return {
         shopifyProductId: v.productId,
         shopifyVariantId: v.variantId,
@@ -139,7 +152,7 @@ export async function createStockCount(
         sku: v.sku,
         barcode: v.barcode,
         variantOptions: JSON.stringify(v.selectedOptions),
-        expectedQuantity: level.quantities.available ?? 0,
+        expectedQuantity: available,
       };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -219,18 +232,126 @@ export async function saveRowCounts(
   countedBy: string | null = null,
 ) {
   if (entries.length === 0) return;
+  const now = new Date();
   await db.$transaction(
     entries.map((e) =>
       db.stockCountLineItem.update({
         where: { id: e.lineItemId },
         data: {
           countedQuantity: e.countedQuantity,
-          countedAt: new Date(),
+          countedAt: now,
           countedBy,
+          // Clear the draft atomically with the commit — otherwise a
+          // stale in-flight draft POST landing after Save Row would
+          // leave the row showing "Draft" until the next revalidate.
+          draftQuantity: null,
+          draftUpdatedAt: null,
         },
       }),
     ),
   );
+}
+
+/**
+ * Persist autosaved draft quantities for one or more line items. Called
+ * from the debounced client-side buffer as the user types. Does NOT
+ * touch `countedQuantity` — the row is only "counted" once the user
+ * hits Save Row (`saveRowCounts`).
+ *
+ * Stale-write guard: skips any line whose `countedAt` is newer than the
+ * client-side edit timestamp. Prevents a slow-in-flight draft POST from
+ * overwriting a Save Row or scan that arrived first.
+ */
+export async function saveDraftQuantities(
+  stockCountId: string,
+  entries: Array<{
+    lineItemId: string;
+    draftQuantity: number | null;
+    clientEditedAt: number;
+  }>,
+) {
+  if (entries.length === 0) return;
+  const now = new Date();
+  await db.$transaction(
+    entries.map((e) =>
+      db.stockCountLineItem.updateMany({
+        // updateMany over update so we can add the countedAt guard in
+        // the WHERE without Prisma yelling about non-unique-key access.
+        where: {
+          id: e.lineItemId,
+          stockCountId,
+          OR: [
+            { countedAt: null },
+            { countedAt: { lt: new Date(e.clientEditedAt) } },
+          ],
+        },
+        data: {
+          draftQuantity: e.draftQuantity,
+          draftUpdatedAt: now,
+        },
+      }),
+    ),
+  );
+}
+
+/**
+ * For each variantId, return the most recent `countedAt` from any OTHER
+ * completed / in-progress count AT THE SAME LOCATION. Powers the
+ * "Last counted N days ago" row subtext on the counting screen.
+ * Location-scoped because history at Marblehead isn't relevant when
+ * you're counting shrink at Tiburon.
+ *
+ * Chunks the IN() list at 500 to stay under SQLite's parameter cap.
+ */
+export async function getPreviouslyCountedAtMap(
+  shop: string,
+  locationId: string,
+  variantIds: string[],
+  excludeStockCountId: string,
+): Promise<
+  Map<string, { countedAt: Date; countName: string; stockCountId: string }>
+> {
+  const out = new Map<
+    string,
+    { countedAt: Date; countName: string; stockCountId: string }
+  >();
+  if (variantIds.length === 0) return out;
+
+  const CHUNK = 500;
+  for (let i = 0; i < variantIds.length; i += CHUNK) {
+    const chunk = variantIds.slice(i, i + CHUNK);
+    // Get the freshest counted line per (variantId) restricted to this
+    // shop + location + not-this-count. Prisma raw for the GROUP BY.
+    const rows = await db.stockCountLineItem.findMany({
+      where: {
+        shopifyVariantId: { in: chunk },
+        countedAt: { not: null },
+        stockCount: {
+          shop,
+          locationId,
+          id: { not: excludeStockCountId },
+        },
+      },
+      orderBy: { countedAt: "desc" },
+      select: {
+        shopifyVariantId: true,
+        countedAt: true,
+        stockCountId: true,
+        stockCount: { select: { name: true } },
+      },
+    });
+    // orderBy desc + first-seen-wins → freshest per variant.
+    for (const r of rows) {
+      if (out.has(r.shopifyVariantId)) continue;
+      if (!r.countedAt) continue;
+      out.set(r.shopifyVariantId, {
+        countedAt: r.countedAt,
+        countName: r.stockCount.name,
+        stockCountId: r.stockCountId,
+      });
+    }
+  }
+  return out;
 }
 
 export async function incrementCount(
@@ -274,33 +395,60 @@ export async function findLineByCode(
 // ============================================
 
 /**
- * Finalize a stock count: generate an InventoryAdjustmentSession to bring
- * Shopify in line with what was counted. Only lines that were actually
- * counted (countedQuantity != null) are applied. Uncounted lines are
- * surfaced in the variance report but NOT zeroed out — leaves the decision
- * to the merchant.
+ * Finalize a stock count: generate an InventoryAdjustmentSession to
+ * bring Shopify in line with what was counted. Counted lines apply
+ * their (counted − current) delta. Uncounted lines the user has
+ * checked in the Complete modal apply as `counted = 0` (phantom stock
+ * reconciliation). Everything else is skipped.
+ *
+ * Atomicity: DB writes for zero-out only fire AFTER Shopify accepts
+ * the adjustment. A Shopify failure leaves the count in `in_progress`
+ * with drafts + counts untouched, safe to retry.
  */
 export async function completeStockCount(
   admin: AdminApiContext,
   shop: string,
   id: string,
-): Promise<{ sessionId: string; applied: number; uncounted: number }> {
+  params: { zeroOutLineItemIds?: string[] } = {},
+): Promise<{
+  sessionId: string;
+  applied: number;
+  zeroed: number;
+  uncounted: number;
+}> {
   const sc = await getStockCount(shop, id);
   if (!sc) throw new Error("Stock count not found");
   if (sc.status !== "in_progress") {
     throw new Error(`Stock count is ${sc.status} — cannot complete again`);
   }
 
-  // Group counted lines and compute deltas
   const counted = sc.lineItems.filter((li) => li.countedQuantity !== null);
   const uncounted = sc.lineItems.filter((li) => li.countedQuantity === null);
 
-  if (counted.length === 0) {
-    throw new Error("Nothing was counted — cannot complete.");
+  // Filter zero-out ids to lines that are (still) uncounted — defends
+  // against a stale modal that references a line another tab just saved.
+  const zeroSet = new Set(params.zeroOutLineItemIds ?? []);
+  const zeroApplied = uncounted.filter((li) => zeroSet.has(li.id));
+
+  if (counted.length === 0 && zeroApplied.length === 0) {
+    throw new Error(
+      "Nothing to apply — count at least one line or zero out an uncounted one.",
+    );
   }
 
-  // Resolve inventoryItem IDs in one batched call
-  const variantIds = counted.map((li) => li.shopifyVariantId);
+  // Merged apply list. Zero-out lines are synthesized with
+  // countedQuantity = 0 so the delta computation works uniformly.
+  const applyList: Array<
+    (typeof sc.lineItems)[number] & { countedQuantity: number }
+  > = [
+    ...counted.map((li) => ({
+      ...li,
+      countedQuantity: li.countedQuantity!,
+    })),
+    ...zeroApplied.map((li) => ({ ...li, countedQuantity: 0 })),
+  ];
+
+  const variantIds = applyList.map((li) => li.shopifyVariantId);
   const invMap = await getVariantsInventory(admin, variantIds);
 
   const changes: Array<{
@@ -311,12 +459,12 @@ export async function completeStockCount(
     previousQuantity: number;
     newQuantity: number;
   }> = [];
-  for (const li of counted) {
+  for (const li of applyList) {
     const inv = invMap.get(li.shopifyVariantId);
     if (!inv) continue;
     const level = inv.levels.find((l) => l.locationId === sc.locationId);
     const currentQty = level?.quantities.available ?? 0;
-    const delta = (li.countedQuantity ?? 0) - currentQty;
+    const delta = li.countedQuantity - currentQty;
     if (delta === 0) continue;
     changes.push({
       inventoryItemId: inv.inventoryItemId,
@@ -324,7 +472,7 @@ export async function completeStockCount(
       delta,
       shopifyVariantId: li.shopifyVariantId,
       previousQuantity: currentQty,
-      newQuantity: li.countedQuantity ?? 0,
+      newQuantity: li.countedQuantity,
     });
   }
 
@@ -367,15 +515,44 @@ export async function completeStockCount(
     sessionId = session.id;
   }
 
-  await db.stockCount.update({
-    where: { id },
-    data: { status: "completed", completedAt: new Date() },
-  });
+  // Post-Shopify writes: persist countedQuantity=0 for the zero-out
+  // lines (so the audit trail shows they were reconciled) and flip
+  // the count to completed. Grouped in one transaction so a hiccup
+  // between them can't leave a completed count with unwritten lines.
+  const now = new Date();
+  await db.$transaction([
+    ...zeroApplied.map((li) =>
+      db.stockCountLineItem.update({
+        where: { id: li.id },
+        data: {
+          countedQuantity: 0,
+          countedAt: now,
+          countedBy: null,
+          draftQuantity: null,
+          draftUpdatedAt: null,
+        },
+      }),
+    ),
+    db.stockCount.update({
+      where: { id },
+      data: { status: "completed", completedAt: now },
+    }),
+  ]);
 
   return {
     sessionId,
-    applied: changes.length,
-    uncounted: uncounted.length,
+    applied: changes.length - zeroApplied.filter((li) => {
+      // A zero-out line whose Shopify current was already 0 contributes
+      // a 0 delta and never enters `changes`. But it still counts
+      // toward `zeroed` (we wrote countedQuantity=0 in DB). Everything
+      // else in `changes` counts toward `applied`.
+      const inv = invMap.get(li.shopifyVariantId);
+      const level = inv?.levels.find((l) => l.locationId === sc.locationId);
+      const currentQty = level?.quantities.available ?? 0;
+      return currentQty !== 0;
+    }).length,
+    zeroed: zeroApplied.length,
+    uncounted: uncounted.length - zeroApplied.length,
   };
 }
 

@@ -279,11 +279,21 @@ model StockCountLineItem {
   countedQuantity  Int? // null until counted
   countedAt        DateTime?
   countedBy        String?
+  // Autosaved as-you-type buffer. `null` = no draft in flight. Cleared
+  // atomically when a row is Save-Row'd (drops to countedQuantity).
+  draftQuantity    Int?
+  // Client-supplied timestamp of the last user edit. Used server-side
+  // as a stale-write guard when a debounced draft POST arrives after
+  // Save Row or a scan has already committed the line.
+  draftUpdatedAt   DateTime?
 
   stockCount StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
 
   @@unique([stockCountId, shopifyVariantId])
   @@index([stockCountId])
+  // Powers the "when was this variant last counted, at this location?"
+  // lookup that surfaces prior-count subtext on the counting screen.
+  @@index([shopifyVariantId, countedAt])
 }
 
 // ============================================
