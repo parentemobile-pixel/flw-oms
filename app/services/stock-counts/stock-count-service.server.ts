@@ -485,7 +485,7 @@ export async function completeStockCount(
         locationId: c.locationId,
         delta: c.delta,
       })),
-      "cycle_count_accuracy",
+      "cycle_count_available",
     );
     if (result.userErrors?.length > 0) {
       throw new Error(
@@ -497,7 +497,7 @@ export async function completeStockCount(
       data: {
         shop,
         locationId: sc.locationId,
-        reason: "cycle_count_accuracy",
+        reason: "cycle_count_available",
         source: "stock_count",
         sourceId: sc.id,
         notes: `Stock count: ${sc.name}`,

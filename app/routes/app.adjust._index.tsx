@@ -141,7 +141,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 const REASON_OPTIONS: Array<{ label: string; value: InventoryAdjustReason }> = [
   { label: "Correction", value: "correction" },
-  { label: "Cycle count accuracy", value: "cycle_count_accuracy" },
+  { label: "Cycle count adjustment", value: "cycle_count_available" },
   { label: "Damaged", value: "damaged" },
   { label: "Shrinkage", value: "shrinkage" },
   { label: "Restock", value: "restock" },

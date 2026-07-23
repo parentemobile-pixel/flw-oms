@@ -217,7 +217,7 @@ model InventoryAdjustmentSession {
   id         String   @id @default(cuid())
   shop       String
   locationId String
-  reason     String // Shopify reason enum: correction | cycle_count_accuracy | damaged | received | shrinkage | restock
+  reason     String // Shopify reason enum: correction | cycle_count_available | damaged | received | shrinkage | restock | other (per Admin API 2025-01+)
   source     String   @default("manual") // manual | po_receive | transfer_receive | stock_count
   sourceId   String? // e.g. PO id, Transfer id, StockCount id
   notes      String?

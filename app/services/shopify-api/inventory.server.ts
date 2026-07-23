@@ -128,7 +128,7 @@ export type InventoryQuantityName =
  */
 export type InventoryAdjustReason =
   | "correction"
-  | "cycle_count_accuracy"
+  | "cycle_count_available"
   | "damaged"
   | "received"
   | "shrinkage"
