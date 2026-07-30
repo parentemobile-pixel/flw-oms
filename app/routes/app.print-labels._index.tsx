@@ -1,11 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import {
-  useActionData,
-  useSubmit,
-  useNavigation,
-} from "@remix-run/react";
+import { useFetcher } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -97,10 +93,11 @@ interface SelectedVariant {
 }
 
 export default function PrintLabels() {
-  const actionData = useActionData<typeof action>();
-  const submit = useSubmit();
-  const navigation = useNavigation();
-  const isSearching = navigation.state === "submitting";
+  // useFetcher (not useSubmit) — dedicated to background XHR so
+  // debounced-typeahead requests don't collide with page navigation
+  // state, and empty responses don't get lost between renders.
+  const searchFetcher = useFetcher<typeof action>();
+  const isSearching = searchFetcher.state !== "idle";
 
   const [query, setQuery] = useState("");
   const [products, setProducts] = useState<SearchProduct[]>([]);
@@ -118,16 +115,17 @@ export default function PrintLabels() {
     const t = setTimeout(() => {
       const fd = new FormData();
       fd.set("query", query);
-      submit(fd, { method: "post" });
+      searchFetcher.submit(fd, { method: "post" });
     }, 300);
     return () => clearTimeout(t);
-  }, [query, submit]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
 
   useEffect(() => {
-    if (actionData && "products" in actionData) {
-      setProducts(actionData.products as SearchProduct[]);
+    if (searchFetcher.data && "products" in searchFetcher.data) {
+      setProducts(searchFetcher.data.products as SearchProduct[]);
     }
-  }, [actionData]);
+  }, [searchFetcher.data]);
 
   const selectedVariantIds = useMemo(
     () => new Set(selected.map((s) => s.variantId)),
@@ -262,13 +260,15 @@ export default function PrintLabels() {
             <Banner tone="critical">{error}</Banner>
           </Layout.Section>
         )}
-        {actionData && "error" in actionData && actionData.error && (
-          <Layout.Section>
-            <Banner tone="critical">
-              Search failed: {String(actionData.error)}
-            </Banner>
-          </Layout.Section>
-        )}
+        {searchFetcher.data &&
+          "error" in searchFetcher.data &&
+          searchFetcher.data.error && (
+            <Layout.Section>
+              <Banner tone="critical">
+                Search failed: {String(searchFetcher.data.error)}
+              </Banner>
+            </Layout.Section>
+          )}
 
         {/* Product picker */}
         <Layout.Section>

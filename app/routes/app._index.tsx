@@ -114,7 +114,10 @@ export default function Index() {
         {/* Print Labels — simple tile button (matches PO / Transfers
             style). Full search-and-print flow lives on the dedicated
             /app/print-labels page. Placed in Replenishment's former
-            slot so it sits higher in the daily-driver order. */}
+            slot so it sits higher in the daily-driver order.
+            Buttons wrapped in InlineStack so they auto-size instead of
+            stretching to the card width (BlockStack's default
+            inlineAlign="stretch" is what does the stretching). */}
         <Layout.Section variant="oneHalf">
           <Card>
             <BlockStack gap="300">
@@ -125,9 +128,11 @@ export default function Index() {
                 Search a product, pick a variant, print barcode labels
                 to the Zebra.
               </Text>
-              <Button url="/app/print-labels" variant="primary">
-                Print labels
-              </Button>
+              <InlineStack gap="200">
+                <Button url="/app/print-labels" variant="primary">
+                  Print labels
+                </Button>
+              </InlineStack>
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -142,9 +147,11 @@ export default function Index() {
                 New product with size/color variants, barcodes, tagging
                 taxonomy — one flow.
               </Text>
-              <Button url="/app/product-builder" variant="primary">
-                Create product
-              </Button>
+              <InlineStack gap="200">
+                <Button url="/app/product-builder" variant="primary">
+                  Create product
+                </Button>
+              </InlineStack>
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -159,9 +166,11 @@ export default function Index() {
                 What sold at one store, what's available at the other, and
                 what to transfer.
               </Text>
-              <Button url="/app/replenishment" variant="primary">
-                Run replenishment
-              </Button>
+              <InlineStack gap="200">
+                <Button url="/app/replenishment" variant="primary">
+                  Run replenishment
+                </Button>
+              </InlineStack>
             </BlockStack>
           </Card>
         </Layout.Section>
