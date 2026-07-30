@@ -328,6 +328,60 @@ export async function updatePurchaseOrderStatus(
 }
 
 /**
+ * Force-close a partially_received PO — the vendor short-shipped and
+ * the remaining units will never arrive, so treat the PO as done
+ * instead of leaving it in partially_received forever.
+ *
+ * Effects:
+ *   - status → "received" (so it drops out of "still expecting"
+ *     views + reports).
+ *   - Appends a "Closed short by user on YYYY-MM-DD (K of N received)"
+ *     line to notes so the audit trail records the reason for the
+ *     early close.
+ *   - Does NOT touch line-item quantities. `quantityReceived <
+ *     quantityOrdered` on each line remains the source of truth for
+ *     "how much was actually received" — the note explains why the
+ *     PO is closed anyway. No Shopify adjustment (we never received
+ *     those units, so nothing to add).
+ *
+ * Only allowed from partially_received. draft / ordered / cancelled
+ * / already-received are rejected — a distinct decision flow.
+ */
+export async function closePurchaseOrderShort(shop: string, id: string) {
+  const existing = await db.purchaseOrder.findFirst({
+    where: { shop, id },
+    include: {
+      lineItems: {
+        select: { quantityOrdered: true, quantityReceived: true },
+      },
+    },
+  });
+  if (!existing) throw new Error("PO not found");
+  if (existing.status !== "partially_received") {
+    throw new Error(
+      `Only partially_received POs can be closed short. This PO is ${existing.status}.`,
+    );
+  }
+  const totalOrdered = existing.lineItems.reduce(
+    (s, li) => s + li.quantityOrdered,
+    0,
+  );
+  const totalReceived = existing.lineItems.reduce(
+    (s, li) => s + li.quantityReceived,
+    0,
+  );
+  const isoDate = new Date().toISOString().slice(0, 10);
+  const closeNote = `Closed short on ${isoDate} (${totalReceived} of ${totalOrdered} received)`;
+  const nextNotes = existing.notes
+    ? `${existing.notes}\n${closeNote}`
+    : closeNote;
+  return db.purchaseOrder.update({
+    where: { id },
+    data: { status: "received", notes: nextNotes },
+  });
+}
+
+/**
  * Toggle the paid flag on a PO. Stores a timestamp (so we know when it
  * was marked paid) rather than a boolean — `paidAt !== null` is the
  * "is paid" predicate everywhere in the UI.

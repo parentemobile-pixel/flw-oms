@@ -34,6 +34,7 @@ import {
   getPurchaseOrder,
   updatePurchaseOrder,
   updatePurchaseOrderStatus,
+  closePurchaseOrderShort,
   deletePurchaseOrder,
   setPurchaseOrderPaid,
   setPurchaseOrderPrinted,
@@ -106,6 +107,15 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     const status = formData.get("status") as string;
     await updatePurchaseOrderStatus(session.shop, params.id!, status);
     return json({ ok: true as const });
+  }
+
+  if (intent === "closeShort") {
+    try {
+      await closePurchaseOrderShort(session.shop, params.id!);
+      return json({ ok: true as const, closedShort: true as const });
+    } catch (error) {
+      return json({ error: String(error) });
+    }
   }
 
   if (intent === "delete") {
@@ -405,6 +415,18 @@ export default function PurchaseOrderDetail() {
     },
     [submit],
   );
+
+  const handleCloseShort = useCallback(() => {
+    if (
+      !window.confirm(
+        `Close PO ${po.poNumber} short? The remaining unreceived items will be treated as "vendor didn't send them." The PO's status flips to received and a note is added; no Shopify inventory changes. This can't be undone through the UI.`,
+      )
+    )
+      return;
+    const fd = new FormData();
+    fd.set("intent", "closeShort");
+    submit(fd, { method: "post" });
+  }, [submit, po.poNumber]);
 
   const handleDelete = useCallback(() => {
     // Stronger copy when the PO has already been acted on. Deleting a
@@ -709,6 +731,8 @@ export default function PurchaseOrderDetail() {
 
   // In edit mode we still want Edit/Save; outside edit mode if the primary
   // action is Receive we keep Edit accessible via secondary actions.
+  // partially_received POs also get a "Close short" action so a
+  // permanently-short shipment can be closed without inventory changes.
   const extraSecondaryActions =
     !isEditing &&
     canEdit &&
@@ -718,6 +742,14 @@ export default function PurchaseOrderDetail() {
             content: "Edit",
             onAction: () => setIsEditing(true),
           },
+          ...(po.status === "partially_received"
+            ? [
+                {
+                  content: "Close short",
+                  onAction: handleCloseShort,
+                },
+              ]
+            : []),
         ]
       : [];
 
