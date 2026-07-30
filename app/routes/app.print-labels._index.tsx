@@ -15,8 +15,14 @@ import {
   Icon,
   Spinner,
   ButtonGroup,
+  Badge,
+  Collapsible,
 } from "@shopify/polaris";
-import { SearchIcon } from "@shopify/polaris-icons";
+import {
+  SearchIcon,
+  ChevronUpIcon,
+  ChevronDownIcon,
+} from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import { searchProducts } from "../services/shopify-api/products.server";
@@ -141,6 +147,7 @@ export default function PrintLabels() {
   );
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerCollapsed, setPickerCollapsed] = useState(false);
 
   // Debounced search.
   useEffect(() => {
@@ -434,41 +441,80 @@ export default function PrintLabels() {
             </Layout.Section>
           )}
 
-        {/* Product picker */}
+        {/* Product picker — collapsible so the grid below has more
+            room once the user has picked their variants. Same pattern
+            as the Transfer new and PO new pages. */}
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
               <InlineStack align="space-between" blockAlign="center">
-                <Text as="h2" variant="headingMd">
-                  Find variants
-                </Text>
-                {isSearching && <Spinner size="small" />}
+                <InlineStack gap="200" blockAlign="center">
+                  <button
+                    type="button"
+                    onClick={() => setPickerCollapsed((v) => !v)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    <Text as="h2" variant="headingMd">
+                      Find variants
+                    </Text>
+                  </button>
+                  {selected.length > 0 && (
+                    <Badge tone="info">{`${selected.length} selected`}</Badge>
+                  )}
+                  {isSearching && <Spinner size="small" />}
+                </InlineStack>
+                <Button
+                  icon={pickerCollapsed ? ChevronDownIcon : ChevronUpIcon}
+                  onClick={() => setPickerCollapsed((v) => !v)}
+                >
+                  {pickerCollapsed ? "Expand section" : "Collapse section"}
+                </Button>
               </InlineStack>
-              <TextField
-                label="Search"
-                labelHidden
-                value={query}
-                onChange={setQuery}
-                placeholder="Search by product title, SKU, or barcode…"
-                autoComplete="off"
-                prefix={<Icon source={SearchIcon} />}
-                clearButton
-                onClearButtonClick={() => {
-                  setQuery("");
-                  setProducts([]);
+              <Collapsible
+                id="print-labels-product-picker"
+                open={!pickerCollapsed}
+                transition={{
+                  duration: "150ms",
+                  timingFunction: "ease-in-out",
                 }}
-              />
-              {!isSearching && query.trim() !== "" && products.length === 0 && (
-                <Text as="p" variant="bodySm" tone="subdued">
-                  No products match &ldquo;{query}&rdquo;.
-                </Text>
-              )}
-              <ProductPicker
-                products={products as PickerProduct[]}
-                selectedVariantIds={selectedVariantIds}
-                onToggleVariant={handleToggleVariant}
-                onToggleGroup={handleToggleGroup}
-              />
+                expandOnPrint
+              >
+                <BlockStack gap="400">
+                  <TextField
+                    label="Search"
+                    labelHidden
+                    value={query}
+                    onChange={setQuery}
+                    placeholder="Search by product title, SKU, or barcode…"
+                    autoComplete="off"
+                    prefix={<Icon source={SearchIcon} />}
+                    clearButton
+                    onClearButtonClick={() => {
+                      setQuery("");
+                      setProducts([]);
+                    }}
+                  />
+                  {!isSearching &&
+                    query.trim() !== "" &&
+                    products.length === 0 && (
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        No products match &ldquo;{query}&rdquo;.
+                      </Text>
+                    )}
+                  <ProductPicker
+                    products={products as PickerProduct[]}
+                    selectedVariantIds={selectedVariantIds}
+                    onToggleVariant={handleToggleVariant}
+                    onToggleGroup={handleToggleGroup}
+                  />
+                </BlockStack>
+              </Collapsible>
             </BlockStack>
           </Card>
         </Layout.Section>
