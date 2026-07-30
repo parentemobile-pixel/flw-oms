@@ -329,6 +329,14 @@ export default function PrintLabels() {
       return;
     }
     setError(null);
+
+    // Popup-blocker workaround: open the tab NOW (still in the click's
+    // user-gesture context) so the browser allows it, then point it at
+    // the blob URL once the PDF is ready. If we called window.open
+    // after the await, the browser would treat it as a programmatic
+    // popup and block it.
+    const pdfWindow = window.open("", "_blank");
+
     const fd = new FormData();
     fd.set("items", JSON.stringify(items));
 
@@ -346,20 +354,52 @@ export default function PrintLabels() {
       }
       const blob = await response.blob();
       if (blob.size === 0) throw new Error("Generated PDF was empty.");
+      // The server returns Content-Disposition: attachment on the raw
+      // response, but blob URLs ignore that — the tab renders inline
+      // via Chrome's built-in PDF viewer.
       const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const label =
-        items.length === 1
-          ? (selected.find((s) => s.variantId === items[0].variantId)?.sku ??
-              "labels").replace(/[^a-zA-Z0-9-_]/g, "_")
-          : `${items.length}-variants`;
-      a.download = `labels-${label}-${totalLabels}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      if (pdfWindow && !pdfWindow.closed) {
+        pdfWindow.location.href = url;
+        // Trigger the print dialog once Chrome's PDF viewer has had a
+        // moment to render the blob. There's no reliable load event
+        // to hook for the built-in PDF viewer, so we heuristic-delay.
+        // If the timing misses (very slow load), the user's Cmd/Ctrl+P
+        // in the new tab still works.
+        setTimeout(() => {
+          try {
+            pdfWindow.focus();
+            pdfWindow.print();
+          } catch {
+            // Cross-origin / popup edge cases — silently skip; user
+            // can still print manually from the new tab.
+          }
+        }, 1200);
+        // Give the tab time to load the blob before revoking. Chrome
+        // usually copies the blob into the viewer within a second or
+        // two; 60s is generous cover for a slow network / big PDF.
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      } else {
+        // Popup blocked. Fall back to a plain download so the user
+        // still gets the PDF, with a message they can adjust settings.
+        const a = document.createElement("a");
+        a.href = url;
+        const label =
+          items.length === 1
+            ? (selected.find((s) => s.variantId === items[0].variantId)?.sku ??
+                "labels").replace(/[^a-zA-Z0-9-_]/g, "_")
+            : `${items.length}-variants`;
+        a.download = `labels-${label}-${totalLabels}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setError(
+          "Your browser blocked the new tab. Allow pop-ups for this site to open the PDF inline; the file was downloaded instead.",
+        );
+      }
     } catch (err) {
+      pdfWindow?.close();
       const msg = err instanceof Error ? err.message : String(err);
       setError(`Couldn't generate labels: ${msg}`);
     } finally {
