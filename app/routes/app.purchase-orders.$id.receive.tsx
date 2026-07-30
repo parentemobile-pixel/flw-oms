@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, type CSSProperties } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import {
@@ -237,15 +237,26 @@ export default function ReceivePurchaseOrder() {
   const [locationId, setLocationId] = useState<string | null>(
     defaultLocationId,
   );
-  // Autofill with the ordered amount — the common case is "receiving
-  // everything that was ordered". Users can -/+ down to reflect actual
-  // counts. For lines that were already partially received, initial value
-  // is still ordered; the action computes the delta so no double-adjust.
+  // Seed to previouslyReceived so any untouched line produces delta=0
+  // at submit — no "auto-fill with ordered" that a user might miss and
+  // accidentally re-receive. User must explicitly type the cumulative
+  // received qty, or hit "Receive all" for the whole PO / "Mark row
+  // received" for a colorway. Fully-received lines stay at their
+  // received count; partially-received lines stay at their partial
+  // count. Both get colored tints below so the user can see status
+  // at a glance without touching them.
   const [quantities, setQuantities] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {};
-    for (const li of po.lineItems) initial[li.id] = li.quantityOrdered;
+    for (const li of po.lineItems) initial[li.id] = li.quantityReceived;
     return initial;
   });
+  // Lines the user has explicitly confirmed edit for during this
+  // session. Adjusting an already-received line pops a confirm the
+  // first time; once acknowledged, further keystrokes on that line
+  // don't re-prompt.
+  const [unlockedLines, setUnlockedLines] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [viewMode, setViewMode] = useState<"line" | "grid">("grid");
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
 
@@ -289,12 +300,31 @@ export default function ReceivePurchaseOrder() {
 
   const handleQuantityChange = useCallback(
     (lineItemId: string, value: number) => {
+      // Warn on the first edit of a line that was already fully or
+      // partially received in a prior session. Prevents accidentally
+      // typing over a completed receive when reopening a partial PO.
+      const li = po.lineItems.find((l) => l.id === lineItemId);
+      if (
+        li &&
+        li.quantityReceived > 0 &&
+        !unlockedLines.has(lineItemId)
+      ) {
+        const ok = window.confirm(
+          `"${li.productTitle} — ${li.variantTitle}" already has ${li.quantityReceived} received previously. Change it anyway?`,
+        );
+        if (!ok) return;
+        setUnlockedLines((prev) => {
+          const next = new Set(prev);
+          next.add(lineItemId);
+          return next;
+        });
+      }
       setQuantities((prev) => ({
         ...prev,
         [lineItemId]: Math.max(0, value),
       }));
     },
-    [],
+    [po.lineItems, unlockedLines],
   );
 
   const handleReceiveAll = useCallback(() => {
@@ -303,10 +333,15 @@ export default function ReceivePurchaseOrder() {
     setQuantities(allReceived);
   }, [po.lineItems]);
 
+  // "Reset" clears any session edits by snapping every line back to
+  // its previously-received count — so untouched → 0 delta on submit.
+  // Explicitly does NOT set everything to 0 (that would reverse prior
+  // receipts, which is a dangerous default).
   const handleReceiveNone = useCallback(() => {
     const reset: Record<string, number> = {};
-    for (const li of po.lineItems) reset[li.id] = 0;
+    for (const li of po.lineItems) reset[li.id] = li.quantityReceived;
     setQuantities(reset);
+    setUnlockedLines(new Set());
   }, [po.lineItems]);
 
   // "Mark row received" — sets every line item in a given (product +
@@ -598,6 +633,28 @@ function QtyInput({
   );
 }
 
+// Row / cell tint based on prior receive status. Same green/yellow
+// convention as the read-only PO view + stock count grid:
+//   green   = fully received (Shopify already got everything)
+//   yellow  = partially received (some but not all)
+//   none    = untouched (fresh line, no prior receipt)
+// Frozen against `quantityReceived` (the DB snapshot), NOT the session's
+// live `quantities[id]` — so cell color reflects "what state did this
+// line come in as" and doesn't flicker while the user types.
+function receiveTintStyle(li: ReceiveLine): CSSProperties | undefined {
+  if (li.quantityReceived === 0) return undefined;
+  if (li.quantityReceived >= li.quantityOrdered) {
+    return {
+      background: "#e7f5ec",
+      boxShadow: "inset 0 0 0 1px #8fd19e",
+    };
+  }
+  return {
+    background: "#fff8dc",
+    boxShadow: "inset 0 0 0 1px #e6cf7a",
+  };
+}
+
 // ─── Line view (flat table) ────────────────────────────────────────────────
 
 function POReceiveLine({
@@ -635,8 +692,15 @@ function POReceiveLine({
           {lineItems.map((li) => {
             const currentQty = quantities[li.id] ?? 0;
             const isComplete = currentQty >= li.quantityOrdered;
+            const tint = receiveTintStyle(li);
             return (
-              <tr key={li.id} style={{ borderBottom: "1px solid #f1f1f1" }}>
+              <tr
+                key={li.id}
+                style={{
+                  borderBottom: "1px solid #f1f1f1",
+                  ...(tint ?? {}),
+                }}
+              >
                 <td style={{ padding: "8px" }}>{li.productTitle}</td>
                 <td style={{ padding: "8px" }}>{li.variantTitle}</td>
                 <td style={{ padding: "8px" }}>{li.sku || "—"}</td>
@@ -788,22 +852,30 @@ function POReceiveGrid({
                   )}
                 </td>
                 {g.noSize ? (
-                  <td
-                    colSpan={sizeColCount}
-                    style={{ padding: "6px 8px", verticalAlign: "top" }}
-                  >
-                    {(() => {
-                      const li = g.bySize["_single"];
-                      if (!li) return "—";
-                      return (
-                        <QtyInput
-                          value={quantities[li.id] ?? 0}
-                          max={li.quantityOrdered}
-                          onChange={(v) => onQuantityChange(li.id, v)}
-                        />
-                      );
-                    })()}
-                  </td>
+                  (() => {
+                    const li = g.bySize["_single"];
+                    const singleTint = li ? receiveTintStyle(li) : undefined;
+                    return (
+                      <td
+                        colSpan={sizeColCount}
+                        style={{
+                          padding: "6px 8px",
+                          verticalAlign: "top",
+                          ...(singleTint ?? {}),
+                        }}
+                      >
+                        {!li ? (
+                          "—"
+                        ) : (
+                          <QtyInput
+                            value={quantities[li.id] ?? 0}
+                            max={li.quantityOrdered}
+                            onChange={(v) => onQuantityChange(li.id, v)}
+                          />
+                        )}
+                      </td>
+                    );
+                  })()
                 ) : (
                   sortedSizes.map((s) => {
                     const li = g.bySize[s];
@@ -822,10 +894,15 @@ function POReceiveGrid({
                         </td>
                       );
                     }
+                    const cellTint = receiveTintStyle(li);
                     return (
                       <td
                         key={s}
-                        style={{ padding: "4px 4px", verticalAlign: "top" }}
+                        style={{
+                          padding: "4px 4px",
+                          verticalAlign: "top",
+                          ...(cellTint ?? {}),
+                        }}
                       >
                         <QtyInput
                           value={quantities[li.id] ?? 0}
