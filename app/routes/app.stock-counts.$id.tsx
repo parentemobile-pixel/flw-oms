@@ -33,6 +33,7 @@ import { authenticate } from "../shopify.server";
 import {
   abandonStockCount,
   completeStockCount,
+  reopenStockCount,
   findLineByCode,
   getPreviouslyCountedAtMap,
   getStockCount,
@@ -98,18 +99,29 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     }
     if (intent === "save-row") {
       // Batch save a whole row's counted quantities. Payload is a JSON
-      // array of { lineItemId, countedQuantity } matching each cell in
-      // the row (including overflow sizes). Goes through in a single
-      // transaction so the row flips to "counted" atomically.
+      // array of { lineItemId, countedQuantity, shopifyVariantId }
+      // matching each cell in the row (including overflow sizes).
+      // Goes through in a single transaction so the row flips to
+      // "counted" atomically. saveRowCounts also snapshots Shopify
+      // `available` for each variant so long-running counts don't
+      // erroneously re-add sales at Complete-time.
       const raw = String(formData.get("entries") ?? "[]");
-      type Entry = { lineItemId: string; countedQuantity: number };
+      type Entry = {
+        lineItemId: string;
+        countedQuantity: number;
+        shopifyVariantId: string;
+      };
       let entries: Entry[] = [];
       try {
         entries = JSON.parse(raw) as Entry[];
       } catch {
         return json({ error: "Bad save-row payload" }, { status: 400 });
       }
-      await saveRowCounts(id, entries);
+      // Look up the count's location so saveRowCounts knows which
+      // level to snapshot.
+      const sc = await getStockCount(session.shop, id);
+      if (!sc) return json({ error: "Stock count not found" }, { status: 404 });
+      await saveRowCounts(admin, id, sc.locationId, entries);
       return json({ ok: true as const, savedRow: true as const });
     }
     if (intent === "save-draft") {
@@ -143,7 +155,11 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       // Scan-to-line: mark this line as "seen" with quantity 1 if it
       // hasn't been counted yet, otherwise +1 the existing count. Lets
       // a user walk the floor with the scanner and tally multiples.
-      await incrementCount(id, lineItemId, 1);
+      // Also snapshots Shopify at scan-time for Complete's delta.
+      const scForScan = await getStockCount(session.shop, id);
+      if (!scForScan)
+        return json({ error: "Stock count not found" }, { status: 404 });
+      await incrementCount(admin, id, scForScan.locationId, lineItemId, 1);
       return json({
         ok: true as const,
         scanResult: { found: true as const, lineItemId, code },
@@ -172,6 +188,18 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     if (intent === "abandon") {
       await abandonStockCount(session.shop, id);
       return json({ ok: true as const });
+    }
+    if (intent === "reopen") {
+      // Flip completed → in_progress. Existing counted values +
+      // shopifyQtyAtSave snapshots stay intact so the user picks up
+      // where they left off. Prior Shopify adjustments are audited
+      // in InventoryAdjustmentSession — not undone.
+      try {
+        await reopenStockCount(session.shop, id);
+        return json({ ok: true as const, reopened: true as const });
+      } catch (error) {
+        return json({ error: String(error) });
+      }
     }
   } catch (error) {
     return json({ error: String(error) });
@@ -350,6 +378,10 @@ export default function StockCountDetail() {
           return {
             lineItemId: li.id,
             countedQuantity: drafts[li.id] ?? li.expectedQuantity,
+            // Server uses this to snapshot Shopify's `available` for
+            // each variant at save-time — the delta anchor Complete
+            // uses so mid-count sales don't get erroneously re-added.
+            shopifyVariantId: li.shopifyVariantId,
           };
         })
         .filter((e): e is NonNullable<typeof e> => e !== null);
@@ -466,6 +498,18 @@ export default function StockCountDetail() {
     if (!window.confirm("Abandon this count? No inventory changes.")) return;
     const fd = new FormData();
     fd.set("intent", "abandon");
+    submit(fd, { method: "post" });
+  }, [submit]);
+
+  const handleReopen = useCallback(() => {
+    if (
+      !window.confirm(
+        "Re-open this completed count? Existing counts stay. Prior Shopify adjustments are NOT undone. Any new work you do will apply as an additional adjustment on the next Complete.",
+      )
+    )
+      return;
+    const fd = new FormData();
+    fd.set("intent", "reopen");
     submit(fd, { method: "post" });
   }, [submit]);
 
@@ -663,6 +707,22 @@ export default function StockCountDetail() {
             </Banner>
           </Layout.Section>
         )}
+        {/* Re-open advisory — surfaces on in_progress counts that have
+            any counted lines, i.e. the user re-opened after a prior
+            Complete. Explains the sales-during-count model. */}
+        {isActive &&
+          sc.lineItems.some((li) => li.countedAt !== null) && (
+            <Layout.Section>
+              <Banner tone="info" title="Re-opened count">
+                Sales that happened since your last save are accounted for
+                automatically — the delta at Complete uses the snapshot
+                taken when you saved each row, not live Shopify. Re-save
+                a row ONLY if you're confirming a new physical count; that
+                refreshes the snapshot and any inventory movement since
+                will get folded into the next adjustment.
+              </Banner>
+            </Layout.Section>
+          )}
 
         {/* Summary + scan + search */}
         <Layout.Section>
@@ -899,7 +959,7 @@ export default function StockCountDetail() {
           </Card>
         </Layout.Section>
 
-        {/* Complete / Abandon */}
+        {/* Complete / Abandon (active count) */}
         {isActive && (
           <Layout.Section>
             <Card>
@@ -926,6 +986,33 @@ export default function StockCountDetail() {
                     Complete ({counted} counted)
                   </Button>
                 </ButtonGroup>
+              </InlineStack>
+            </Card>
+          </Layout.Section>
+        )}
+
+        {/* Re-open (completed count) — flips back to in_progress so
+            the user can keep counting on top of prior work. Prior
+            Shopify adjustments stay applied (audit trail intact);
+            re-Complete just applies any new deltas. */}
+        {sc.status === "completed" && (
+          <Layout.Section>
+            <Card>
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="p" variant="bodyMd">
+                  This count is <strong>completed</strong> and Shopify
+                  already got its adjustments. Re-open to keep counting
+                  (fix a data entry, add missed rows). Any new work
+                  applies as an additional adjustment on the next
+                  Complete.
+                </Text>
+                <Button
+                  variant="primary"
+                  onClick={handleReopen}
+                  loading={isBusy}
+                >
+                  Re-open count
+                </Button>
               </InlineStack>
             </Card>
           </Layout.Section>

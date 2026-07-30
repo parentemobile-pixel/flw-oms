@@ -286,6 +286,13 @@ model StockCountLineItem {
   // as a stale-write guard when a debounced draft POST arrives after
   // Save Row or a scan has already committed the line.
   draftUpdatedAt   DateTime?
+  // Shopify's `available` for this variant at the location AT THE MOMENT
+  // Save Row (or scan increment) fired. Complete uses this — not live
+  // Shopify — as the "expected" for the delta computation, so sales that
+  // hit Shopify between Save Row and Complete don't get erroneously
+  // re-added. Refreshed after a successful Complete to keep re-Complete
+  // idempotent. Nullable: pre-migration rows fall back to live Shopify.
+  shopifyQtyAtSave Int?
 
   stockCount StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
 

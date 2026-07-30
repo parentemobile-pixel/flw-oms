@@ -223,15 +223,47 @@ export async function recordCount(
 /**
  * Persist counted quantities for a batch of line items in one shot.
  * Used by the per-row "Save" button on the count detail page so the
- * whole row flips to "counted" atomically instead of trickling in
- * cell-by-cell. Does NOT touch Shopify — that happens on complete.
+ * whole row flips to "counted" atomically.
+ *
+ * Also SNAPSHOTS Shopify's current `available` for each involved
+ * variant into `shopifyQtyAtSave`. That snapshot is what Complete's
+ * delta computation uses — so sales that hit Shopify BETWEEN Save
+ * Row and Complete don't get re-added. Without this a long-running
+ * count (e.g. counting Monday, completing Friday, with sales during
+ * the week) would produce wrong adjustments.
  */
 export async function saveRowCounts(
+  admin: AdminApiContext,
   stockCountId: string,
-  entries: Array<{ lineItemId: string; countedQuantity: number }>,
+  locationId: string,
+  entries: Array<{
+    lineItemId: string;
+    countedQuantity: number;
+    shopifyVariantId: string;
+  }>,
   countedBy: string | null = null,
 ) {
   if (entries.length === 0) return;
+
+  // Snapshot Shopify's current `available` for each variant. If the
+  // fetch fails, save the counts anyway (shopifyQtyAtSave stays null →
+  // Complete falls back to live Shopify, i.e. pre-rework behavior).
+  const variantIds = [...new Set(entries.map((e) => e.shopifyVariantId))];
+  let snapByVariant = new Map<string, number>();
+  try {
+    const invMap = await getVariantsInventory(admin, variantIds);
+    for (const [variantId, inv] of invMap.entries()) {
+      const level = inv.levels.find((l) => l.locationId === locationId);
+      if (level) snapByVariant.set(variantId, level.quantities.available ?? 0);
+    }
+  } catch (error) {
+    console.warn(
+      "[saveRowCounts] inventory snapshot failed — falling back to live-Shopify delta at Complete",
+      error,
+    );
+    snapByVariant = new Map();
+  }
+
   const now = new Date();
   await db.$transaction(
     entries.map((e) =>
@@ -241,6 +273,7 @@ export async function saveRowCounts(
           countedQuantity: e.countedQuantity,
           countedAt: now,
           countedBy,
+          shopifyQtyAtSave: snapByVariant.get(e.shopifyVariantId) ?? null,
           // Clear the draft atomically with the commit — otherwise a
           // stale in-flight draft POST landing after Save Row would
           // leave the row showing "Draft" until the next revalidate.
@@ -355,7 +388,9 @@ export async function getPreviouslyCountedAtMap(
 }
 
 export async function incrementCount(
-  id: string,
+  admin: AdminApiContext,
+  stockCountId: string,
+  locationId: string,
   lineItemId: string,
   delta: number = 1,
   countedBy: string | null = null,
@@ -365,7 +400,35 @@ export async function incrementCount(
   });
   if (!current) throw new Error("line not found");
   const next = Math.max(0, (current.countedQuantity ?? 0) + delta);
-  return recordCount(id, lineItemId, next, countedBy);
+
+  // Snapshot Shopify at scan-time so the delta at Complete reflects
+  // what was on the shelf when the scan happened, not what Shopify
+  // says at Complete-time. Best-effort; failure leaves the field null
+  // (falls back to live-Shopify at Complete).
+  let snap: number | null = null;
+  try {
+    const invMap = await getVariantsInventory(admin, [current.shopifyVariantId]);
+    const inv = invMap.get(current.shopifyVariantId);
+    const level = inv?.levels.find((l) => l.locationId === locationId);
+    snap = level?.quantities.available ?? null;
+  } catch (error) {
+    console.warn(
+      "[incrementCount] inventory snapshot failed — falling back to live-Shopify delta at Complete",
+      error,
+    );
+  }
+
+  return db.stockCountLineItem.update({
+    where: { id: lineItemId },
+    data: {
+      countedQuantity: next,
+      countedAt: new Date(),
+      countedBy,
+      shopifyQtyAtSave: snap,
+      draftQuantity: null,
+      draftUpdatedAt: null,
+    },
+  });
 }
 
 /**
@@ -464,14 +527,19 @@ export async function completeStockCount(
     if (!inv) continue;
     const level = inv.levels.find((l) => l.locationId === sc.locationId);
     const currentQty = level?.quantities.available ?? 0;
-    const delta = li.countedQuantity - currentQty;
+    // Delta anchor: prefer the Save-Row snapshot ("what Shopify said
+    // when the user counted"), fall back to live-Shopify for lines
+    // saved before the snapshot column existed. Using the snapshot
+    // means sales between Save Row and Complete don't get re-added.
+    const anchorQty = li.shopifyQtyAtSave ?? currentQty;
+    const delta = li.countedQuantity - anchorQty;
     if (delta === 0) continue;
     changes.push({
       inventoryItemId: inv.inventoryItemId,
       locationId: sc.locationId,
       delta,
       shopifyVariantId: li.shopifyVariantId,
-      previousQuantity: currentQty,
+      previousQuantity: anchorQty,
       newQuantity: li.countedQuantity,
     });
   }
@@ -515,11 +583,26 @@ export async function completeStockCount(
     sessionId = session.id;
   }
 
-  // Post-Shopify writes: persist countedQuantity=0 for the zero-out
-  // lines (so the audit trail shows they were reconciled) and flip
-  // the count to completed. Grouped in one transaction so a hiccup
-  // between them can't leave a completed count with unwritten lines.
+  // Post-Shopify writes:
+  //   - persist countedQuantity=0 for zero-out lines (audit trail)
+  //   - REFRESH shopifyQtyAtSave for every applied line to reflect
+  //     the post-adjustment Shopify state (= countedQuantity, since
+  //     that's what Shopify is now at). Makes re-Complete idempotent:
+  //     if the user re-opens and hits Complete again without changing
+  //     anything, delta = counted - counted = 0 → no double-adjust.
+  //   - flip the count status to completed.
+  // Grouped in one transaction so a hiccup between them can't leave
+  // a completed count with unwritten lines.
   const now = new Date();
+  const changedIds = new Set(changes.map((c) => c.shopifyVariantId));
+  const refreshUpdates = applyList
+    .filter((li) => changedIds.has(li.shopifyVariantId))
+    .map((li) =>
+      db.stockCountLineItem.update({
+        where: { id: li.id },
+        data: { shopifyQtyAtSave: li.countedQuantity },
+      }),
+    );
   await db.$transaction([
     ...zeroApplied.map((li) =>
       db.stockCountLineItem.update({
@@ -528,11 +611,13 @@ export async function completeStockCount(
           countedQuantity: 0,
           countedAt: now,
           countedBy: null,
+          shopifyQtyAtSave: 0,
           draftQuantity: null,
           draftUpdatedAt: null,
         },
       }),
     ),
+    ...refreshUpdates,
     db.stockCount.update({
       where: { id },
       data: { status: "completed", completedAt: now },
@@ -541,19 +626,42 @@ export async function completeStockCount(
 
   return {
     sessionId,
-    applied: changes.length - zeroApplied.filter((li) => {
-      // A zero-out line whose Shopify current was already 0 contributes
-      // a 0 delta and never enters `changes`. But it still counts
-      // toward `zeroed` (we wrote countedQuantity=0 in DB). Everything
-      // else in `changes` counts toward `applied`.
-      const inv = invMap.get(li.shopifyVariantId);
-      const level = inv?.levels.find((l) => l.locationId === sc.locationId);
-      const currentQty = level?.quantities.available ?? 0;
-      return currentQty !== 0;
-    }).length,
+    applied: changes.length,
     zeroed: zeroApplied.length,
     uncounted: uncounted.length - zeroApplied.length,
   };
+}
+
+/**
+ * Re-open a previously completed stock count. Flips status back to
+ * in_progress and clears completedAt. All counted values +
+ * shopifyQtyAtSave snapshots are PRESERVED — the count is picked up
+ * exactly where it left off. Shopify adjustments from prior Complete
+ * cycles remain applied (audit trail via InventoryAdjustmentSession).
+ *
+ * Re-Complete after a re-open is idempotent for untouched lines
+ * because Complete's post-write refreshes shopifyQtyAtSave to
+ * countedQuantity — so delta = counted - counted = 0. Sales that
+ * happened after the last Complete are NOT erased (Shopify at
+ * Complete-time is lower than the snapshot; delta stays 0).
+ *
+ * Only allowed on completed counts. abandoned / in_progress reject.
+ */
+export async function reopenStockCount(shop: string, id: string) {
+  const existing = await db.stockCount.findFirst({
+    where: { shop, id },
+    select: { id: true, status: true },
+  });
+  if (!existing) throw new Error("Stock count not found");
+  if (existing.status !== "completed") {
+    throw new Error(
+      `Only completed counts can be re-opened. This count is ${existing.status}.`,
+    );
+  }
+  return db.stockCount.update({
+    where: { id },
+    data: { status: "in_progress", completedAt: null },
+  });
 }
 
 export async function abandonStockCount(shop: string, id: string) {
