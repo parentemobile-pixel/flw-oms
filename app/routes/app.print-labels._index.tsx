@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import {
@@ -18,20 +18,28 @@ import {
   InlineStack,
   Icon,
   Spinner,
-  Badge,
 } from "@shopify/polaris";
-import { SearchIcon } from "@shopify/polaris-icons";
+import { SearchIcon, DeleteIcon } from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
 import { searchProducts } from "../services/shopify-api/products.server";
+import {
+  ProductPicker,
+  type PickerProduct,
+  type PickerVariant,
+} from "../components/ProductPicker";
 
-interface VariantHit {
-  variantId: string;
-  productTitle: string;
-  variantTitle: string;
-  sku: string | null;
-  barcode: string | null;
-  price: number | null;
+interface SearchProduct {
+  id: string;
+  title: string;
+  variants: Array<{
+    id: string;
+    title: string;
+    sku: string | null;
+    barcode: string | null;
+    price: string | null;
+    selectedOptions: Array<{ name: string; value: string }>;
+  }>;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -44,31 +52,49 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const query = String(formData.get("query") ?? "").trim();
 
-  if (!query) return json({ variants: [] as VariantHit[] });
+  if (!query) return json({ products: [] as SearchProduct[] });
 
   try {
     const result = await searchProducts(admin, query);
-    const variants: VariantHit[] = [];
-    for (const edge of result.edges as Array<{ node: any }>) {
-      const product = edge.node;
-      for (const vEdge of product.variants.edges as Array<{ node: any }>) {
-        const priceStr = vEdge.node.price;
-        variants.push({
-          variantId: vEdge.node.id,
-          productTitle: product.title,
-          variantTitle: vEdge.node.title,
-          sku: vEdge.node.sku ?? null,
-          barcode: vEdge.node.barcode ?? null,
-          price: priceStr ? parseFloat(priceStr) || null : null,
-        });
-      }
-    }
-    return json({ variants });
+    const products: SearchProduct[] = (
+      result.edges as Array<{ node: any }>
+    ).map((edge) => {
+      const p = edge.node;
+      return {
+        id: p.id,
+        title: p.title,
+        variants: (p.variants.edges as Array<{ node: any }>).map((v) => ({
+          id: v.node.id,
+          title: v.node.title,
+          sku: v.node.sku ?? null,
+          barcode: v.node.barcode ?? null,
+          price: v.node.price ?? null,
+          selectedOptions: v.node.selectedOptions ?? [],
+        })),
+      };
+    });
+    return json({ products });
   } catch (error) {
     console.error("Label search failed:", error);
-    return json({ variants: [] as VariantHit[], error: String(error) });
+    return json({
+      products: [] as SearchProduct[],
+      error: String(error),
+    });
   }
 };
+
+// Metadata cached client-side so the "Selected variants" list can
+// render product/variant titles + SKU/barcode/price without needing
+// the picker's product still in scope after selection.
+interface SelectedVariant {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  barcode: string | null;
+  price: string | null;
+}
 
 export default function PrintLabels() {
   const actionData = useActionData<typeof action>();
@@ -77,14 +103,16 @@ export default function PrintLabels() {
   const isSearching = navigation.state === "submitting";
 
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<VariantHit[]>([]);
-  const [selected, setSelected] = useState<VariantHit | null>(null);
+  const [products, setProducts] = useState<SearchProduct[]>([]);
+  const [selected, setSelected] = useState<SelectedVariant[]>([]);
   const [quantity, setQuantity] = useState("1");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Debounced search
+  // Debounced search — 300ms after the user stops typing.
   useEffect(() => {
     if (!query.trim()) {
-      setResults([]);
+      setProducts([]);
       return;
     }
     const t = setTimeout(() => {
@@ -96,28 +124,95 @@ export default function PrintLabels() {
   }, [query, submit]);
 
   useEffect(() => {
-    if (actionData && "variants" in actionData) {
-      setResults(actionData.variants as VariantHit[]);
+    if (actionData && "products" in actionData) {
+      setProducts(actionData.products as SearchProduct[]);
     }
   }, [actionData]);
 
-  const [isGenerating, setIsGenerating] = useState(false);
+  const selectedVariantIds = useMemo(
+    () => new Set(selected.map((s) => s.variantId)),
+    [selected],
+  );
+
+  const handleToggleVariant = useCallback(
+    (product: PickerProduct, variant: PickerVariant, checked: boolean) => {
+      if (checked) {
+        // Look up full variant metadata (price / barcode) from search
+        // results — PickerVariant doesn't carry them.
+        const srcProduct = products.find((p) => p.id === product.id);
+        const srcVariant = srcProduct?.variants.find(
+          (v) => v.id === variant.id,
+        );
+        setSelected((prev) =>
+          prev.some((s) => s.variantId === variant.id)
+            ? prev
+            : [
+                ...prev,
+                {
+                  variantId: variant.id,
+                  productId: product.id,
+                  productTitle: product.title,
+                  variantTitle: variant.title,
+                  sku: variant.sku,
+                  barcode: srcVariant?.barcode ?? null,
+                  price: srcVariant?.price ?? null,
+                },
+              ],
+        );
+      } else {
+        setSelected((prev) =>
+          prev.filter((s) => s.variantId !== variant.id),
+        );
+      }
+    },
+    [products],
+  );
+
+  const handleToggleGroup = useCallback(
+    (
+      product: PickerProduct,
+      groupVariants: PickerVariant[],
+      checked: boolean,
+    ) => {
+      if (checked) {
+        const srcProduct = products.find((p) => p.id === product.id);
+        const additions: SelectedVariant[] = [];
+        for (const v of groupVariants) {
+          if (selectedVariantIds.has(v.id)) continue;
+          const srcVariant = srcProduct?.variants.find((x) => x.id === v.id);
+          additions.push({
+            variantId: v.id,
+            productId: product.id,
+            productTitle: product.title,
+            variantTitle: v.title,
+            sku: v.sku,
+            barcode: srcVariant?.barcode ?? null,
+            price: srcVariant?.price ?? null,
+          });
+        }
+        if (additions.length === 0) return;
+        setSelected((prev) => [...prev, ...additions]);
+      } else {
+        const removeIds = new Set(groupVariants.map((v) => v.id));
+        setSelected((prev) =>
+          prev.filter((s) => !removeIds.has(s.variantId)),
+        );
+      }
+    },
+    [products, selectedVariantIds],
+  );
+
   const handlePrint = useCallback(async () => {
-    if (!selected || isGenerating) return;
-    const qty = Math.max(
-      1,
-      Math.min(500, parseInt(quantity, 10) || 1),
-    );
+    if (selected.length === 0 || isGenerating) return;
+    setError(null);
+    const qty = Math.max(1, Math.min(500, parseInt(quantity, 10) || 1));
     const fd = new FormData();
     fd.set("quantity", String(qty));
-    fd.set("productTitle", selected.productTitle);
-    fd.set("variantTitle", selected.variantTitle);
-    fd.set("sku", selected.sku ?? "");
-    fd.set("barcode", selected.barcode ?? "");
-    if (selected.price != null) fd.set("price", String(selected.price));
+    fd.set(
+      "variantIds",
+      JSON.stringify(selected.map((s) => s.variantId)),
+    );
 
-    // Fetch inside the authenticated iframe (target=_blank would lose the
-    // Shopify admin session token), then trigger a blob download.
     setIsGenerating(true);
     try {
       const response = await fetch("/api/labels/adhoc", {
@@ -131,152 +226,170 @@ export default function PrintLabels() {
         );
       }
       const blob = await response.blob();
-      if (blob.size === 0) {
-        throw new Error("Generated PDF was empty.");
-      }
+      if (blob.size === 0) throw new Error("Generated PDF was empty.");
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const safeSku =
-        (selected.sku ?? "labels").replace(/[^a-zA-Z0-9-_]/g, "_") || "labels";
-      a.download = `labels-${safeSku}-${qty}.pdf`;
+      const label =
+        selected.length === 1
+          ? (selected[0].sku ?? "labels").replace(/[^a-zA-Z0-9-_]/g, "_")
+          : `${selected.length}-variants`;
+      a.download = `labels-${label}-${qty}.pdf`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      console.error("Print labels failed:", error);
-      window.alert(
-        `Couldn't generate labels: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`Couldn't generate labels: ${msg}`);
     } finally {
       setIsGenerating(false);
     }
   }, [selected, quantity, isGenerating]);
 
+  const totalLabels =
+    selected.length *
+    Math.max(1, Math.min(500, parseInt(quantity, 10) || 1));
+
   return (
     <Page
       title="Print Labels"
-      subtitle="Print extra barcode labels for any product variant"
+      subtitle="Search a product, pick variants, print barcode labels."
     >
       <Layout>
+        {error && (
+          <Layout.Section>
+            <Banner tone="critical">{error}</Banner>
+          </Layout.Section>
+        )}
+        {actionData && "error" in actionData && actionData.error && (
+          <Layout.Section>
+            <Banner tone="critical">
+              Search failed: {String(actionData.error)}
+            </Banner>
+          </Layout.Section>
+        )}
+
+        {/* Product picker */}
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
-              <Text as="h2" variant="headingMd">
-                1. Find the variant
-              </Text>
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="h2" variant="headingMd">
+                  Find variants
+                </Text>
+                {isSearching && <Spinner size="small" />}
+              </InlineStack>
               <TextField
-                label="Search products"
+                label="Search"
                 labelHidden
                 value={query}
                 onChange={setQuery}
-                placeholder="Search by product title, SKU, or vendor…"
+                placeholder="Search by product title, SKU, or barcode…"
                 autoComplete="off"
                 prefix={<Icon source={SearchIcon} />}
                 clearButton
                 onClearButtonClick={() => {
                   setQuery("");
-                  setResults([]);
+                  setProducts([]);
                 }}
               />
-              {isSearching && (
-                <InlineStack gap="200" blockAlign="center">
-                  <Spinner size="small" />
-                  <Text as="span" tone="subdued" variant="bodySm">
-                    Searching…
-                  </Text>
-                </InlineStack>
-              )}
-
-              {results.length > 0 && (
-                <BlockStack gap="100">
-                  {results.map((v) => {
-                    const isSelected = selected?.variantId === v.variantId;
-                    return (
-                      <div
-                        key={v.variantId}
-                        onClick={() => setSelected(v)}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: "6px",
-                          cursor: "pointer",
-                          background: isSelected ? "#f0f7ff" : "transparent",
-                          border: isSelected
-                            ? "1px solid #1e88e5"
-                            : "1px solid #e1e3e5",
-                        }}
-                      >
-                        <InlineStack
-                          align="space-between"
-                          blockAlign="center"
-                          wrap={false}
-                        >
-                          <BlockStack gap="050">
-                            <Text as="p" variant="bodyMd" fontWeight="medium">
-                              {v.productTitle} —{" "}
-                              <Text as="span" tone="subdued">
-                                {v.variantTitle}
-                              </Text>
-                            </Text>
-                            <InlineStack gap="200">
-                              {v.sku && (
-                                <Text as="span" variant="bodySm" tone="subdued">
-                                  SKU: {v.sku}
-                                </Text>
-                              )}
-                              {v.barcode && (
-                                <Text as="span" variant="bodySm" tone="subdued">
-                                  Barcode: {v.barcode}
-                                </Text>
-                              )}
-                            </InlineStack>
-                          </BlockStack>
-                          {isSelected && <Badge tone="info">Selected</Badge>}
-                        </InlineStack>
-                      </div>
-                    );
-                  })}
-                </BlockStack>
-              )}
-
-              {query.trim() && !isSearching && results.length === 0 && (
-                <Text as="p" tone="subdued">
-                  No matches.
+              {!isSearching && query.trim() !== "" && products.length === 0 && (
+                <Text as="p" variant="bodySm" tone="subdued">
+                  No products match &ldquo;{query}&rdquo;.
                 </Text>
               )}
+              <ProductPicker
+                products={products as PickerProduct[]}
+                selectedVariantIds={selectedVariantIds}
+                onToggleVariant={handleToggleVariant}
+                onToggleGroup={handleToggleGroup}
+              />
             </BlockStack>
           </Card>
         </Layout.Section>
 
-        {selected && (
+        {/* Selected variants + quantity + print */}
+        {selected.length > 0 && (
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
-                <Text as="h2" variant="headingMd">
-                  2. Print
-                </Text>
-                <Banner tone="info">
-                  <Text as="p" variant="bodyMd">
-                    <strong>{selected.productTitle}</strong> —{" "}
-                    {selected.variantTitle}
-                    <br />
-                    SKU: {selected.sku ?? "—"} · Barcode:{" "}
-                    {selected.barcode ?? "(will use SKU)"}
-                    {selected.price != null && (
-                      <>
-                        {" "}
-                        · Price: ${selected.price.toFixed(2)}
-                      </>
-                    )}
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text as="h2" variant="headingMd">
+                    Selected variants ({selected.length})
                   </Text>
-                </Banner>
-                <InlineStack gap="300" blockAlign="end">
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    Will print {totalLabels} label
+                    {totalLabels !== 1 ? "s" : ""} total
+                  </Text>
+                </InlineStack>
+
+                <div style={{ overflowX: "auto" }}>
+                  <table
+                    style={{
+                      width: "100%",
+                      borderCollapse: "collapse",
+                      fontSize: "13px",
+                    }}
+                  >
+                    <thead>
+                      <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
+                        <th style={{ padding: "8px", textAlign: "left" }}>
+                          Product
+                        </th>
+                        <th style={{ padding: "8px", textAlign: "left" }}>
+                          Variant
+                        </th>
+                        <th style={{ padding: "8px", textAlign: "left" }}>
+                          SKU
+                        </th>
+                        <th style={{ padding: "8px", textAlign: "left" }}>
+                          Barcode
+                        </th>
+                        <th style={{ padding: "8px", width: "40px" }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selected.map((s) => (
+                        <tr
+                          key={s.variantId}
+                          style={{ borderBottom: "1px solid #f1f1f1" }}
+                        >
+                          <td style={{ padding: "8px" }}>{s.productTitle}</td>
+                          <td style={{ padding: "8px" }}>{s.variantTitle}</td>
+                          <td style={{ padding: "8px" }}>{s.sku || "—"}</td>
+                          <td style={{ padding: "8px" }}>
+                            {s.barcode || (
+                              <Text as="span" tone="subdued">
+                                (will use SKU)
+                              </Text>
+                            )}
+                          </td>
+                          <td style={{ padding: "8px" }}>
+                            <Button
+                              icon={DeleteIcon}
+                              variant="plain"
+                              tone="critical"
+                              accessibilityLabel="Remove"
+                              onClick={() =>
+                                setSelected((prev) =>
+                                  prev.filter(
+                                    (x) => x.variantId !== s.variantId,
+                                  ),
+                                )
+                              }
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <InlineStack gap="300" blockAlign="end" align="end">
                   <div style={{ maxWidth: "180px" }}>
                     <TextField
-                      label="How many labels?"
+                      label="Labels per variant"
                       type="number"
                       value={quantity}
                       onChange={setQuantity}
@@ -291,12 +404,15 @@ export default function PrintLabels() {
                     loading={isGenerating}
                     disabled={isGenerating}
                   >
-                    {isGenerating ? "Generating…" : "Generate label PDF"}
+                    {isGenerating
+                      ? "Generating…"
+                      : `Print ${totalLabels} label${totalLabels !== 1 ? "s" : ""}`}
                   </Button>
                 </InlineStack>
                 <Text as="p" variant="bodySm" tone="subdued">
                   PDF downloads to your browser. Open and print to your
-                  Zebra printer. Label size: 2" × 1" (landscape).
+                  Zebra printer. Label size: 2&Prime; &times; 1&Prime;
+                  (landscape).
                 </Text>
               </BlockStack>
             </Card>

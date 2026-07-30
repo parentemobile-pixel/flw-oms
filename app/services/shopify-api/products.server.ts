@@ -1040,12 +1040,36 @@ export async function createFileFromStagedUpload(
   return { id: file.id };
 }
 
+/**
+ * Product typeahead search used by PO create, Transfer create, Forecast,
+ * Print Labels, etc.
+ *
+ * Constrains the query to `title | sku | barcode` substring matches
+ * instead of passing the raw string to Shopify. Shopify's default
+ * `products(query:)` searches across MANY fields (title, description,
+ * tags, sku, barcode, vendor, product_type), which routinely produces
+ * confusing matches: typing "GLO" surfacing a "Sopwith Sweater" because
+ * some field on that product happened to contain "GLO". Users expect
+ * the search to match what they see (product name) or what they scan /
+ * type (SKU / barcode), not internal metadata.
+ */
 export async function searchProducts(admin: AdminApiContext, query: string) {
+  const scoped = buildProductSearchQuery(query);
   const response = await admin.graphql(SEARCH_PRODUCTS_QUERY, {
-    variables: { query },
+    variables: { query: scoped },
   });
   const data = await response.json();
   return data.data.products;
+}
+
+// Build a Shopify products search query scoped to the fields a human
+// user typically wants to match on. Empty / whitespace input returns an
+// empty string so the caller can decide what "no query" means; every
+// current caller treats empty as "don't search".
+export function buildProductSearchQuery(query: string): string {
+  const q = query.trim().replace(/["\\]/g, "");
+  if (!q) return "";
+  return `title:*${q}* OR sku:*${q}* OR barcode:*${q}*`;
 }
 
 // Search products filtered by vendor with typeahead
