@@ -13,7 +13,6 @@ import {
 
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { LabelQuickPrint } from "../components/LabelQuickPrint";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -112,18 +111,22 @@ export default function Index() {
           </Card>
         </Layout.Section>
 
+        {/* Print Labels — simple tile button (matches PO / Transfers
+            style). Full search-and-print flow lives on the dedicated
+            /app/print-labels page. Placed in Replenishment's former
+            slot so it sits higher in the daily-driver order. */}
         <Layout.Section variant="oneHalf">
           <Card>
             <BlockStack gap="300">
               <Text as="h2" variant="headingMd">
-                Replenishment
+                Print Labels
               </Text>
               <Text as="p" variant="bodySm" tone="subdued">
-                What sold at one store, what's available at the other, and
-                what to transfer.
+                Search a product, pick a variant, print barcode labels
+                to the Zebra.
               </Text>
-              <Button url="/app/replenishment" variant="primary">
-                Run replenishment
+              <Button url="/app/print-labels" variant="primary">
+                Print labels
               </Button>
             </BlockStack>
           </Card>
@@ -146,11 +149,21 @@ export default function Index() {
           </Card>
         </Layout.Section>
 
-        {/* Print Labels tile — LabelQuickPrint is a full working
-            widget (search → pick → print), so it plays the role of
-            the "Print Labels" tile directly. */}
         <Layout.Section variant="oneHalf">
-          <LabelQuickPrint />
+          <Card>
+            <BlockStack gap="300">
+              <Text as="h2" variant="headingMd">
+                Replenishment
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                What sold at one store, what's available at the other, and
+                what to transfer.
+              </Text>
+              <Button url="/app/replenishment" variant="primary">
+                Run replenishment
+              </Button>
+            </BlockStack>
+          </Card>
         </Layout.Section>
 
         {/* Secondary tools — everything else, compact list */}
