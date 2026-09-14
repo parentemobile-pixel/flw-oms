@@ -657,11 +657,12 @@ export function ProductGrid({
                             return addSub != null ? (
                               <div
                                 style={{
-                                  fontSize: "11px",
+                                  fontSize: "10px",
                                   color: "#6b7280",
                                   textAlign: "center",
                                   marginTop: "2px",
                                   lineHeight: 1.2,
+                                  whiteSpace: "nowrap",
                                 }}
                               >
                                 {addSub}
@@ -713,11 +714,12 @@ export function ProductGrid({
                       {subtext != null && (
                         <div
                           style={{
-                            fontSize: "11px",
+                            fontSize: "10px",
                             color: "#6b7280",
                             textAlign: "center",
                             marginTop: "2px",
                             lineHeight: 1.2,
+                            whiteSpace: "nowrap",
                           }}
                         >
                           {subtext}

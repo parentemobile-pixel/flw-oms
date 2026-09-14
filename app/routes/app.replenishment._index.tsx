@@ -47,7 +47,7 @@ const MAX_RANGE_DAYS = 60;
 
 // Short labels for the two stores in the per-cell stock readout.
 // Fixed for now (the report is always Marblehead → Tiburon in practice).
-const DEST_LABEL = "TIB";
+const DEST_LABEL = "TB";
 const SRC_LABEL = "MHD";
 
 // Where the report stashes the transfer prefill before navigating to
