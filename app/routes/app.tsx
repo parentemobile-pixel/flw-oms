@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "@remix-run/node";
 import { Link, Outlet, useLoaderData, useRouteError } from "@remix-run/react";
 import { boundary } from "@shopify/shopify-app-remix/server";
@@ -17,6 +18,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
+
+  // Stop the mouse wheel / trackpad from nudging the value of a focused
+  // <input type="number">. Every quantity field in the app is a Polaris
+  // TextField (which doesn't expose onWheel), so one non-passive
+  // document-level listener covers all of them. preventDefault only
+  // fires while the pointer is over the focused number input, so normal
+  // page scrolling is unaffected.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      const el = e.target;
+      if (
+        el instanceof HTMLInputElement &&
+        el.type === "number" &&
+        document.activeElement === el
+      ) {
+        e.preventDefault();
+      }
+    };
+    document.addEventListener("wheel", onWheel, { passive: false });
+    return () => document.removeEventListener("wheel", onWheel);
+  }, []);
 
   return (
     <AppProvider isEmbeddedApp apiKey={apiKey}>

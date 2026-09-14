@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { useActionData, useLoaderData, useNavigation, useSubmit } from "@remix-run/react";
@@ -26,17 +26,84 @@ import {
   cancelTransfer,
   setTransferTracking,
   setTransferName,
+  updateTransfer,
 } from "../services/transfers/transfer-service.server";
-import { getLocations } from "../services/shopify-api/locations.server";
+import { handleTransferEditorIntent } from "../services/transfers/transfer-editor.server";
+import {
+  getLocations,
+  type Location,
+} from "../services/shopify-api/locations.server";
+import { getVariantSelectedOptions } from "../services/shopify-api/products.server";
+import { getVariantsInventory } from "../services/shopify-api/inventory.server";
+import {
+  TransferEditor,
+  type TransferEditorPayload,
+  type TransferRow,
+} from "../components/TransferEditor";
+
+// Fallback when Shopify no longer knows the variant (deleted): pull a
+// size token out of "M / Navy"-style titles so the grid can still place
+// the line in a column.
+const SIZE_TOKENS = new Set([
+  "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL",
+  "OS", "ONE SIZE",
+]);
+function optionsFromVariantTitle(
+  title: string,
+): Array<{ name: string; value: string }> {
+  const parts = title.split(" / ").map((p) => p.trim()).filter(Boolean);
+  const out: Array<{ name: string; value: string }> = [];
+  for (const part of parts) {
+    if (SIZE_TOKENS.has(part.toUpperCase())) out.push({ name: "Size", value: part });
+    else out.push({ name: "Option", value: part });
+  }
+  return out;
+}
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const t = await getTransfer(session.shop, params.id!);
   if (!t) throw new Response("Not found", { status: 404 });
-  const locations = await getLocations(admin, session.shop).catch(() => []);
+  const locations = await getLocations(admin, session.shop).catch(
+    () => [] as Location[],
+  );
   const locMap = new Map(locations.map((l) => [l.id, l.name]));
+
+  // Drafts are editable: hydrate the rows the TransferEditor needs
+  // (option data for the size grid + live stock at the From location).
+  // Line items are persisted without selectedOptions, so we look them
+  // up in one batched call and fall back to parsing the variant title.
+  let editRows: TransferRow[] = [];
+  if (t.status === "draft" && t.lineItems.length > 0) {
+    const ids = t.lineItems.map((li) => li.shopifyVariantId);
+    const [optionsById, invMap] = await Promise.all([
+      getVariantSelectedOptions(admin, ids).catch(
+        () => new Map<string, Array<{ name: string; value: string }>>(),
+      ),
+      getVariantsInventory(admin, ids).catch(() => null),
+    ]);
+    editRows = t.lineItems.map((li) => {
+      const inv = invMap?.get(li.shopifyVariantId);
+      const level = inv?.levels.find((l) => l.locationId === t.fromLocationId);
+      return {
+        variantId: li.shopifyVariantId,
+        productId: li.shopifyProductId,
+        productTitle: li.productTitle,
+        variantTitle: li.variantTitle,
+        sku: li.sku,
+        selectedOptions:
+          optionsById.get(li.shopifyVariantId) ??
+          optionsFromVariantTitle(li.variantTitle),
+        fromStock: level?.quantities.available ?? 0,
+        quantitySent: li.quantitySent,
+      };
+    });
+  }
+
   return json({
     t,
+    locations,
+    editRows,
     fromName: locMap.get(t.fromLocationId) ?? t.fromLocationId,
     toName: locMap.get(t.toLocationId) ?? t.toLocationId,
   });
@@ -47,7 +114,24 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
+  // Product search + From-location stock for edit mode.
+  const helper = await handleTransferEditorIntent(admin, intent, formData);
+  if (helper) return helper;
+
   try {
+    if (intent === "update") {
+      const lineItems = JSON.parse(
+        String(formData.get("lineItems") ?? "[]"),
+      ) as TransferEditorPayload["lineItems"];
+      await updateTransfer(session.shop, params.id!, {
+        name: String(formData.get("name") ?? ""),
+        notes: String(formData.get("notes") ?? ""),
+        fromLocationId: String(formData.get("fromLocationId") ?? ""),
+        toLocationId: String(formData.get("toLocationId") ?? ""),
+        lineItems,
+      });
+      return json({ ok: true as const, updated: true as const });
+    }
     if (intent === "send") {
       await sendTransfer(admin, session.shop, params.id!);
       return json({ ok: true as const });
@@ -122,11 +206,36 @@ function trackingUrl(carrier: string | null, num: string): string {
 }
 
 export default function TransferDetail() {
-  const { t, fromName, toName } = useLoaderData<typeof loader>();
+  const { t, locations, editRows, fromName, toName } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isBusy = navigation.state === "submitting";
+
+  // Edit mode (drafts only). The shared TransferEditor replaces the
+  // read-only cards; saving posts `intent=update` and we drop back to
+  // the read-only view once the action confirms.
+  const [isEditing, setIsEditing] = useState(false);
+  const canEdit = t.status === "draft";
+  useEffect(() => {
+    if (actionData && "ok" in actionData && actionData.ok) {
+      setIsEditing(false);
+    }
+  }, [actionData]);
+  const handleSaveEdit = useCallback(
+    (payload: TransferEditorPayload) => {
+      const fd = new FormData();
+      fd.set("intent", "update");
+      fd.set("fromLocationId", payload.fromLocationId);
+      fd.set("toLocationId", payload.toLocationId);
+      fd.set("name", payload.name);
+      fd.set("notes", payload.notes);
+      fd.set("lineItems", JSON.stringify(payload.lineItems));
+      submit(fd, { method: "post" });
+    },
+    [submit],
+  );
 
   // Per-line receipt state for the Receive flow
   const [receipts, setReceipts] = useState<Record<string, number>>(() => {
@@ -275,6 +384,11 @@ export default function TransferDetail() {
           {STATUS_LABELS[t.status] ?? t.status}
         </Badge>
       }
+      primaryAction={
+        canEdit && !isEditing
+          ? { content: "Edit", onAction: () => setIsEditing(true) }
+          : undefined
+      }
       secondaryActions={[
         {
           content:
@@ -297,14 +411,16 @@ export default function TransferDetail() {
       ]}
     >
       <Layout>
-        {actionData && "ok" in actionData && (
+        {actionData && "ok" in actionData && !isEditing && (
           <Layout.Section>
             <Banner tone="success">
               {t.status === "in_transit"
                 ? "Inventory subtracted at source. Transfer is in transit."
                 : t.status === "received"
                   ? "All units received. Transfer complete."
-                  : "Saved as draft. Click “Send” when ready to ship."}
+                  : "updated" in actionData
+                    ? "Draft updated. Edit again or Send when ready to ship."
+                    : "Saved as draft. Edit or Send when ready to ship."}
             </Banner>
           </Layout.Section>
         )}
@@ -314,7 +430,26 @@ export default function TransferDetail() {
           </Layout.Section>
         )}
 
+        {isEditing && (
+          <TransferEditor
+            key={t.updatedAt as unknown as string}
+            locations={locations}
+            initial={{
+              name: t.name ?? "",
+              notes: t.notes ?? "",
+              fromLocationId: t.fromLocationId,
+              toLocationId: t.toLocationId,
+              rows: editRows,
+            }}
+            onSave={handleSaveEdit}
+            saveLabel="Save changes"
+            isBusy={isBusy}
+            onCancel={() => setIsEditing(false)}
+          />
+        )}
+
         {/* Header */}
+        {!isEditing && (
         <Layout.Section>
           <Card>
             <BlockStack gap="400">
@@ -375,9 +510,10 @@ export default function TransferDetail() {
             </BlockStack>
           </Card>
         </Layout.Section>
+        )}
 
         {/* Editable transfer name */}
-        {t.status !== "cancelled" && (
+        {!isEditing && t.status !== "cancelled" && (
           <Layout.Section>
             <Card>
               <InlineStack gap="400" wrap blockAlign="end">
@@ -405,7 +541,7 @@ export default function TransferDetail() {
         )}
 
         {/* Shipping & tracking — manually entered */}
-        {t.status !== "cancelled" && (
+        {!isEditing && t.status !== "cancelled" && (
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
@@ -461,6 +597,7 @@ export default function TransferDetail() {
         )}
 
         {/* Line items */}
+        {!isEditing && (
         <Layout.Section>
           <Card padding="0">
             <DataTable
@@ -477,9 +614,10 @@ export default function TransferDetail() {
             />
           </Card>
         </Layout.Section>
+        )}
 
         {/* Draft actions */}
-        {t.status === "draft" && (
+        {!isEditing && t.status === "draft" && (
           <Layout.Section>
             <Card>
               <BlockStack gap="400">
@@ -495,6 +633,7 @@ export default function TransferDetail() {
                   <Button tone="critical" onClick={handleCancel} loading={isBusy}>
                     Cancel transfer
                   </Button>
+                  <Button onClick={() => setIsEditing(true)}>Edit</Button>
                   <Button variant="primary" onClick={handleSend} loading={isBusy}>
                     Send — subtract at source
                   </Button>
@@ -505,7 +644,7 @@ export default function TransferDetail() {
         )}
 
         {/* Receive flow */}
-        {(t.status === "in_transit" ||
+        {!isEditing && (t.status === "in_transit" ||
           (t.status === "received" && totalReceived < totalSent)) && (
           <Layout.Section>
             <Card>

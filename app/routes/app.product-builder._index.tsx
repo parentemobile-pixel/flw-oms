@@ -274,12 +274,20 @@ export default function ProductBuilder() {
   //   - Product rating / rating count: Shopify's standard review
   //     metafields, written by review apps at runtime — nothing the
   //     merchandiser should ever fill in on create.
+  //   - Genre / Language version / Target audience / Book cover type /
+  //     Clothing accessory material: Shopify category metafields that
+  //     don't apply to the catalog — noise on every product form.
   const isBuilderHiddenMetafield = (def: MetafieldDefinition): boolean => {
     const hay = `${def.namespace} ${def.key} ${def.name}`.toLowerCase();
     return (
       /\bsize\b|\bsizes\b/.test(hay) ||
       /\bcolor\b|\bcolour\b|\bcolors\b|\bcolours\b/.test(hay) ||
-      /\brating\b|\bratings\b/.test(hay)
+      /\brating\b|\bratings\b/.test(hay) ||
+      /\bgenre\b/.test(hay) ||
+      /language[-_ ]version/.test(hay) ||
+      /target[-_ ]audience/.test(hay) ||
+      /book[-_ ]cover[-_ ]type/.test(hay) ||
+      /clothing[-_ ]accessory[-_ ]material/.test(hay)
     );
   };
   const visibleMetafieldDefs = metafieldDefs.filter(

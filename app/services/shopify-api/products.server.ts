@@ -840,6 +840,7 @@ const SEARCH_PRODUCTS_QUERY = `#graphql
           id
           title
           vendor
+          status
           featuredImage {
             url
             altText
@@ -1060,6 +1061,54 @@ export async function searchProducts(admin: AdminApiContext, query: string) {
   });
   const data = await response.json();
   return data.data.products;
+}
+
+/**
+ * Batched lookup of `selectedOptions` for a set of variant gids. Used
+ * where line items were persisted without option data (transfers) but
+ * the size grid needs it. Missing / errored variants are simply absent
+ * from the result map — callers fall back to parsing `variantTitle`.
+ */
+export async function getVariantSelectedOptions(
+  admin: AdminApiContext,
+  variantIds: string[],
+): Promise<Map<string, Array<{ name: string; value: string }>>> {
+  const out = new Map<string, Array<{ name: string; value: string }>>();
+  const ids = [...new Set(variantIds)];
+  const CHUNK = 100;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    try {
+      const resp = await admin.graphql(
+        `#graphql
+          query VariantSelectedOptions($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on ProductVariant {
+                id
+                selectedOptions { name value }
+              }
+            }
+          }
+        `,
+        { variables: { ids: chunk } },
+      );
+      const data = (await resp.json()) as {
+        data?: {
+          nodes?: Array<{
+            id?: string;
+            selectedOptions?: Array<{ name: string; value: string }>;
+          } | null>;
+        };
+      };
+      for (const node of data.data?.nodes ?? []) {
+        if (!node?.id) continue;
+        out.set(node.id, node.selectedOptions ?? []);
+      }
+    } catch (e) {
+      console.error("getVariantSelectedOptions chunk failed:", e);
+    }
+  }
+  return out;
 }
 
 // Build a Shopify products search query scoped to the fields a human

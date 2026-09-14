@@ -24,6 +24,10 @@ export default function App() {
         />
         <Meta />
         <Links />
+        {/* A horizontal trackpad swipe inside a wide table must never
+            turn into browser back-navigation (Chrome / Safari swipe
+            gesture). Applies app-wide, including the embedded iframe. */}
+        <style>{`html, body { overscroll-behavior-x: none; }`}</style>
       </head>
       <body>
         <Outlet />

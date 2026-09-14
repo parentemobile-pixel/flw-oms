@@ -14,6 +14,8 @@ export interface ReplenishmentRow {
   sold: number;
   /** Units currently available at the source location. */
   sourceAvailable: number;
+  /** Units currently available at the destination location. */
+  destinationAvailable: number;
 }
 
 export interface ReplenishmentSummary {
@@ -80,8 +82,8 @@ const PRODUCT_PEER_VARIANTS_QUERY = `#graphql
  *   2. Hydrate variant metadata (title, options, sku, product title) in
  *      one batched `nodes` call.
  *   3. Fetch per-location inventory in batches via the existing
- *      `getVariantsInventory` helper and pluck the source-location's
- *      `available` qty per variant.
+ *      `getVariantsInventory` helper and pluck the source- and
+ *      destination-location `available` qty per variant.
  *   4. Assemble flat report rows + roll-up summary.
  *
  * The route computes per-row note flags ("Restockable", "Last unit",
@@ -235,9 +237,12 @@ export async function buildReplenishmentReport(
     ...peerIds,
   ]);
   const sourceAvailableByVariant = new Map<string, number>();
+  const destAvailableByVariant = new Map<string, number>();
   for (const [variantId, inv] of invMap.entries()) {
-    const level = inv.levels.find((l) => l.locationId === sourceLocationGid);
-    sourceAvailableByVariant.set(variantId, level?.quantities.available ?? 0);
+    const src = inv.levels.find((l) => l.locationId === sourceLocationGid);
+    sourceAvailableByVariant.set(variantId, src?.quantities.available ?? 0);
+    const dest = inv.levels.find((l) => l.locationId === destLocationGid);
+    destAvailableByVariant.set(variantId, dest?.quantities.available ?? 0);
   }
 
   // 4. Assemble rows. Variants whose metadata fetch failed get a
@@ -254,6 +259,7 @@ export async function buildReplenishmentReport(
       selectedOptions: meta?.selectedOptions ?? [],
       sold: sale.netQuantity,
       sourceAvailable: sourceAvailableByVariant.get(sale.variantId) ?? 0,
+      destinationAvailable: destAvailableByVariant.get(sale.variantId) ?? 0,
     };
   });
 
@@ -291,6 +297,7 @@ export async function buildReplenishmentReport(
       selectedOptions: meta.selectedOptions,
       sold: 0,
       sourceAvailable: sourceAvailableByVariant.get(variantId) ?? 0,
+      destinationAvailable: destAvailableByVariant.get(variantId) ?? 0,
     }),
   );
 

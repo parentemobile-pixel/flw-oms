@@ -45,6 +45,11 @@ import {
 
 const MAX_RANGE_DAYS = 60;
 
+// Short labels for the two stores in the per-cell stock readout.
+// Fixed for now (the report is always Marblehead → Tiburon in practice).
+const DEST_LABEL = "TIB";
+const SRC_LABEL = "MHD";
+
 // Where the report stashes the transfer prefill before navigating to
 // /app/transfers/new. Kept in sync with the consumer in that route.
 const PREFILL_STORAGE_KEY = "flw-oms.transfer-prefill";
@@ -310,6 +315,20 @@ function NoteBadge({ note }: { note: RowNote }) {
   }
 }
 
+/** Plain-text version of the note badge — used by the PDF. */
+function noteLabel(note: RowNote): string {
+  switch (note.kind) {
+    case "restockable":
+      return "Restockable";
+    case "lastUnit":
+      return `Last unit at source · ${note.sizes.join(", ")}`;
+    case "partialOOS":
+      return `Partial · ${note.sizes.join(", ")} OOS`;
+    case "oos":
+      return "OOS at source";
+  }
+}
+
 interface SavedActionData {
   report?: ReplenishmentReport;
   sourceLocationGid?: string;
@@ -375,8 +394,17 @@ export default function Replenishment() {
   // Promoted peer variants (added via "+") get folded into the rows so
   // they share the same downstream pipeline (grid, qty seed, transfer
   // payload, CSV).
-  const reportApiRows = actionData?.report?.rows ?? [];
-  const peerVariants = actionData?.report?.peerVariants ?? [];
+  // Memoized so downstream memos/effects keyed on these don't re-run
+  // every render when there's no report yet (`?? []` would be a fresh
+  // array each time).
+  const reportApiRows = useMemo(
+    () => actionData?.report?.rows ?? [],
+    [actionData],
+  );
+  const peerVariants = useMemo(
+    () => actionData?.report?.peerVariants ?? [],
+    [actionData],
+  );
   const rawReportRows = useMemo(() => {
     if (addedPeerIds.size === 0) return reportApiRows;
     const promoted = peerVariants.filter((p) => addedPeerIds.has(p.variantId));
@@ -409,47 +437,50 @@ export default function Replenishment() {
     return m;
   }, [peerVariants, addedPeerIds, removedVariantIds]);
 
-  // Stable key identifying which report is in view; we re-seed
-  // transferQty whenever it changes.
-  const reportKey = useMemo(
-    () => reportRows.map((r) => r.variantId).join(","),
-    [reportRows],
-  );
-
-  // Seed transferQty in a clean effect, not during render. The earlier
-  // "setState during render with a guard" pattern was technically legal
-  // but trips up React's strict-mode double-invoke check and is a
-  // known source of flaky behavior.
-  useEffect(() => {
-    if (reportRows.length === 0) return;
-    const seed: Record<string, number> = {};
-    for (const row of reportRows) {
-      seed[row.variantId] = Math.max(
-        0,
-        Math.min(row.sold, row.sourceAvailable),
-      );
-    }
-    setTransferQty(seed);
-    // reportKey is a stable scalar derived from reportRows; using it
-    // as the dep keeps this from re-running on every render that
-    // re-creates an empty array literal for actionData.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportKey]);
-
-  // Clear the row-removal set when a brand-new report arrives so
-  // dismissals from a prior run don't silently filter out variants
-  // the new run cares about. Key off the RAW row set so the effect
-  // doesn't fire when only `removedVariantIds` change.
-  // Key off the API-returned rows only — folding promoted peers into
-  // the key would make a peer promotion immediately clear itself.
+  // Stable key identifying which report run is in view. Keyed off the
+  // API-returned rows ONLY — not the filtered `reportRows` — so that
+  // removing a row (or promoting a peer) never re-seeds quantities the
+  // user has already edited. (That was the "remove one row, every qty
+  // resets" bug.)
   const rawReportKey = useMemo(
     () => reportApiRows.map((r) => r.variantId).join(","),
     [reportApiRows],
   );
+
+  const seedFor = (row: ReplenishmentRow): number =>
+    Math.max(0, Math.min(row.sold, row.sourceAvailable));
+
+  // Seed transferQty for a brand-new report run. Runs in a clean
+  // effect, not during render — the "setState during render with a
+  // guard" pattern trips React's strict-mode double-invoke check.
   useEffect(() => {
+    const seed: Record<string, number> = {};
+    for (const row of reportApiRows) seed[row.variantId] = seedFor(row);
+    setTransferQty(seed);
+    // Also clear dismissals / promotions from a prior run so they
+    // don't silently filter out variants the new run cares about.
     setRemovedVariantIds(new Set());
     setAddedPeerIds(new Set());
+    // rawReportKey is a stable scalar derived from reportApiRows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawReportKey]);
+
+  // Promoted peers ("+" click) get a seed only if they don't already
+  // have a value — existing edits are left untouched.
+  useEffect(() => {
+    if (addedPeerIds.size === 0) return;
+    setTransferQty((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const peer of peerVariants) {
+        if (!addedPeerIds.has(peer.variantId)) continue;
+        if (peer.variantId in next) continue;
+        next[peer.variantId] = seedFor(peer);
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [addedPeerIds, peerVariants]);
 
   const handleCellChange = useCallback((variantId: string, next: number) => {
     setTransferQty((prev) => ({ ...prev, [variantId]: Math.max(0, next) }));
@@ -479,20 +510,44 @@ export default function Replenishment() {
     [reportRows, transferQty],
   );
 
-  // Per-cell subtext: "Sold N · Src M" so the user sees both the
-  // demand (what TB sold) and the supply (what MHD has) without
-  // leaving the cell.
+  // Per-cell subtext: "Sold N · TIB a · MHD b" so the user sees the
+  // demand (what the destination sold) and the stock on hand at BOTH
+  // stores without leaving the cell.
   const getCellSubtext = useCallback(
     (cell: GridCell) => {
       const row = rowByVariantId.get(cell.variantId);
       if (!row) return null;
       return (
         <>
-          Sold {row.sold} · Src {row.sourceAvailable}
+          Sold {row.sold}
+          <br />
+          {DEST_LABEL} {row.destinationAvailable} · {SRC_LABEL}{" "}
+          {row.sourceAvailable}
         </>
       );
     },
     [rowByVariantId],
+  );
+
+  // Same readout for the un-promoted "+" cells (sizes that didn't
+  // sell) so every variant of a product shown has its stock visible.
+  const peerByVariantId = useMemo(() => {
+    const m = new Map<string, ReplenishmentRow>();
+    for (const p of peerVariants) m.set(p.variantId, p);
+    return m;
+  }, [peerVariants]);
+  const getAddCellSubtext = useCallback(
+    (variantId: string) => {
+      const peer = peerByVariantId.get(variantId);
+      if (!peer) return null;
+      return (
+        <>
+          {DEST_LABEL} {peer.destinationAvailable} · {SRC_LABEL}{" "}
+          {peer.sourceAvailable}
+        </>
+      );
+    },
+    [peerByVariantId],
   );
 
   // Color cells by urgency: red = source has 0 (can't ship), amber =
@@ -682,8 +737,10 @@ export default function Replenishment() {
     submit,
   ]);
 
-  const totalProposed = Object.values(transferQty).reduce(
-    (s, n) => s + (n || 0),
+  // Sum over the rows still in the grid — `transferQty` may hold
+  // values for rows the user has since removed.
+  const totalProposed = reportRows.reduce(
+    (s, r) => s + (transferQty[r.variantId] || 0),
     0,
   );
 
@@ -707,7 +764,8 @@ export default function Replenishment() {
       "Size",
       "SKU",
       "Sold",
-      "Source available",
+      `${DEST_LABEL} available`,
+      `${SRC_LABEL} available`,
       "Proposed transfer qty",
     ];
     const rows = reportRows.map((r) => {
@@ -724,6 +782,7 @@ export default function Replenishment() {
         sizeOpt?.value ?? r.variantTitle,
         r.sku ?? "",
         r.sold,
+        r.destinationAvailable,
         r.sourceAvailable,
         transferQty[r.variantId] ?? 0,
       ];
@@ -743,12 +802,143 @@ export default function Replenishment() {
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [reportRows, transferQty, startDate, endDate]);
-  const handlePrint = useCallback(() => {
-    // Browser print dialog renders the grid as-is. The user can pick
-    // "Save as PDF" from there. Keeps us off building a server-side
-    // PDF for v1.
-    if (typeof window !== "undefined") window.print();
-  }, []);
+  // Print PDF — server-rendered snapshot of the grid as it stands
+  // (every row, current transfer quantities, notes). Opens in a new
+  // tab and auto-triggers the print dialog; mirrors the Print Labels
+  // flow in app.print-labels._index.tsx.
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const handlePrintPdf = useCallback(async () => {
+    if (isGeneratingPdf || reportRows.length === 0) return;
+    setPdfError(null);
+
+    // Group rows by (product, colorway) so each row's note can be
+    // computed the same way the grid does.
+    const byRowKey = new Map<string, ReplenishmentRow[]>();
+    for (const r of reportRows) {
+      const nonSize = r.selectedOptions
+        .filter((o) => o.name.toLowerCase() !== "size")
+        .map((o) => o.value)
+        .join(" / ");
+      const key = `${r.productId}::${nonSize}`;
+      if (!byRowKey.has(key)) byRowKey.set(key, []);
+      byRowKey.get(key)!.push(r);
+    }
+    const noteByRowKey = new Map<string, string>();
+    for (const [key, group] of byRowKey.entries()) {
+      const note = classifyRow(
+        group.map((r) => ({
+          size:
+            r.selectedOptions.find((o) => o.name.toLowerCase() === "size")
+              ?.value ?? r.variantTitle,
+          sold: r.sold,
+          available: r.sourceAvailable,
+        })),
+      );
+      noteByRowKey.set(key, noteLabel(note));
+    }
+    const pdfRows = reportRows.map((r) => {
+      const sizeOpt = r.selectedOptions.find(
+        (o) => o.name.toLowerCase() === "size",
+      );
+      const nonSize = r.selectedOptions
+        .filter((o) => o.name.toLowerCase() !== "size")
+        .map((o) => o.value)
+        .join(" / ");
+      const key = `${r.productId}::${nonSize}`;
+      return {
+        productTitle: r.productTitle,
+        colorway: nonSize,
+        size: sizeOpt?.value ?? r.variantTitle,
+        sku: r.sku,
+        sold: r.sold,
+        destinationAvailable: r.destinationAvailable,
+        sourceAvailable: r.sourceAvailable,
+        transferQty: transferQty[r.variantId] ?? 0,
+        box: boxByRowKey[key] ?? 1,
+        note: noteByRowKey.get(key) ?? "",
+      };
+    });
+
+    // Popup-blocker workaround: open the tab NOW (still inside the
+    // click's user-gesture context), then point it at the blob URL
+    // once the PDF is ready.
+    const pdfWindow = window.open("", "_blank");
+
+    const fd = new FormData();
+    fd.set("rows", JSON.stringify(pdfRows));
+    fd.set("startDate", startDate);
+    fd.set("endDate", endDate);
+    fd.set(
+      "destinationName",
+      locations.find((l) => l.id === destLocationId)?.name ?? DEST_LABEL,
+    );
+    fd.set(
+      "sourceName",
+      locations.find((l) => l.id === sourceLocationId)?.name ?? SRC_LABEL,
+    );
+    fd.set("destLabel", DEST_LABEL);
+    fd.set("srcLabel", SRC_LABEL);
+
+    setIsGeneratingPdf(true);
+    try {
+      const response = await fetch("/api/replenishment-pdf", {
+        method: "POST",
+        body: fd,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `PDF endpoint returned ${response.status}. ${body.slice(0, 200)}`,
+        );
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) throw new Error("Generated PDF was empty.");
+      const url = URL.createObjectURL(blob);
+      if (pdfWindow && !pdfWindow.closed) {
+        pdfWindow.location.href = url;
+        // Chrome's built-in PDF viewer has no reliable load event, so
+        // heuristic-delay the print dialog. Cmd/Ctrl+P still works if
+        // the timing misses.
+        setTimeout(() => {
+          try {
+            pdfWindow.focus();
+            pdfWindow.print();
+          } catch {
+            // popup edge cases — user can print manually from the tab
+          }
+        }, 1200);
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `replenishment-${startDate}-to-${endDate}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setPdfError(
+          "Your browser blocked the new tab. Allow pop-ups for this site to open the PDF inline; the file was downloaded instead.",
+        );
+      }
+    } catch (err) {
+      pdfWindow?.close();
+      const msg = err instanceof Error ? err.message : String(err);
+      setPdfError(`Couldn't generate the PDF: ${msg}`);
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  }, [
+    isGeneratingPdf,
+    reportRows,
+    transferQty,
+    boxByRowKey,
+    startDate,
+    endDate,
+    locations,
+    destLocationId,
+    sourceLocationId,
+  ]);
 
   return (
     <Page
@@ -756,6 +946,13 @@ export default function Replenishment() {
       subtitle="What sold at the destination, what's available at the source, and what to transfer."
     >
       <Layout>
+        {pdfError && (
+          <Layout.Section>
+            <Banner tone="critical" onDismiss={() => setPdfError(null)}>
+              {pdfError}
+            </Banner>
+          </Layout.Section>
+        )}
         {actionData && "error" in actionData && actionData.error && (
           <Layout.Section>
             <Banner tone="critical">{actionData.error}</Banner>
@@ -939,9 +1136,10 @@ export default function Replenishment() {
                   sizeColumns={["XS", "S", "M", "L", "XL", "2XL", "3XL"]}
                   getCellStyle={getCellStyle}
                   getCellSubtext={getCellSubtext}
+                  getAddCellSubtext={getAddCellSubtext}
+                  fitWidth
                   trailingLabel="Note"
                   renderRowTrailing={renderRowTrailing}
-                  stickyLeadColumn
                   maxHeight="75vh"
                   onRemoveRow={(variantIds) => {
                     // Drop the variant ids from the working set so the
@@ -1017,7 +1215,9 @@ export default function Replenishment() {
                   </div>
                 );
               })()}
-              <Button onClick={handlePrint}>Print</Button>
+              <Button onClick={handlePrintPdf} loading={isGeneratingPdf}>
+                Print PDF
+              </Button>
               <Button onClick={handleExportCsv}>Export CSV</Button>
               <Button
                 variant="primary"

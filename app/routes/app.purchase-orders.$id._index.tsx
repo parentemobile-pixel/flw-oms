@@ -30,6 +30,7 @@ import {
 import { SearchIcon, DeleteIcon } from "@shopify/polaris-icons";
 
 import { authenticate } from "../shopify.server";
+import { productStatusLabel } from "../components/ProductPicker";
 import {
   getPurchaseOrder,
   updatePurchaseOrder,
@@ -89,6 +90,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
             variantId: v.node.id,
             productId: p.id,
             productTitle: p.title,
+            productStatus: p.status ?? null,
             variantTitle: v.node.title,
             sku: v.node.sku ?? null,
             barcode: v.node.barcode ?? null,
@@ -243,6 +245,7 @@ interface SearchHit {
   variantId: string;
   productId: string;
   productTitle: string;
+  productStatus: string | null;
   variantTitle: string;
   sku: string | null;
   barcode: string | null;
@@ -1164,6 +1167,14 @@ export default function PurchaseOrderDetail() {
                                 <Text as="span" tone="subdued">
                                   {h.variantTitle}
                                 </Text>
+                                {productStatusLabel(h.productStatus) && (
+                                  <>
+                                    {" "}
+                                    <Badge tone="warning">
+                                      {productStatusLabel(h.productStatus)!}
+                                    </Badge>
+                                  </>
+                                )}
                               </Text>
                               <Text as="p" variant="bodySm" tone="subdued">
                                 {h.sku || "no SKU"}

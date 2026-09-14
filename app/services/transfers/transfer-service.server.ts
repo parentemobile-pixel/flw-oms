@@ -81,6 +81,75 @@ export async function createTransfer(shop: string, data: CreateTransferInput) {
   });
 }
 
+export interface UpdateTransferInput {
+  name?: string | null;
+  notes?: string | null;
+  fromLocationId?: string;
+  toLocationId?: string;
+  /** If provided, replaces the existing line items (delete + recreate,
+   *  same as `updatePurchaseOrder`). Only allowed while status is draft. */
+  lineItems?: TransferLineItemInput[];
+}
+
+/**
+ * Edit a DRAFT transfer in place — name, notes, endpoints, and/or the
+ * full line-item set. Once a transfer has been sent, inventory has
+ * already moved, so edits are refused.
+ */
+export async function updateTransfer(
+  shop: string,
+  id: string,
+  data: UpdateTransferInput,
+) {
+  const t = await db.inventoryTransfer.findFirst({ where: { shop, id } });
+  if (!t) throw new Error("Transfer not found");
+  if (t.status !== "draft") {
+    throw new Error("Only draft transfers can be edited.");
+  }
+
+  const fromLocationId = data.fromLocationId ?? t.fromLocationId;
+  const toLocationId = data.toLocationId ?? t.toLocationId;
+  if (fromLocationId === toLocationId) {
+    throw new Error("From and To locations must be different.");
+  }
+
+  let cleanLines: TransferLineItemInput[] | undefined;
+  if (data.lineItems !== undefined) {
+    cleanLines = data.lineItems.filter((li) => li.quantitySent > 0);
+    if (cleanLines.length === 0) {
+      throw new Error("At least one line item must have quantity > 0.");
+    }
+    await db.inventoryTransferLineItem.deleteMany({
+      where: { transferId: id },
+    });
+  }
+
+  return db.inventoryTransfer.update({
+    where: { id },
+    data: {
+      ...(data.name !== undefined ? { name: data.name?.trim() || null } : {}),
+      ...(data.notes !== undefined ? { notes: data.notes || null } : {}),
+      fromLocationId,
+      toLocationId,
+      ...(cleanLines
+        ? {
+            lineItems: {
+              create: cleanLines.map((li) => ({
+                shopifyProductId: li.shopifyProductId,
+                shopifyVariantId: li.shopifyVariantId,
+                productTitle: li.productTitle,
+                variantTitle: li.variantTitle,
+                sku: li.sku ?? null,
+                quantitySent: li.quantitySent,
+              })),
+            },
+          }
+        : {}),
+    },
+    include: { lineItems: true },
+  });
+}
+
 export async function getTransfers(shop: string) {
   return db.inventoryTransfer.findMany({
     where: { shop },

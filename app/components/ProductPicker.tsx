@@ -26,7 +26,18 @@ export interface PickerVariant {
 export interface PickerProduct {
   id: string;
   title: string;
+  /** Shopify product status (ACTIVE / ARCHIVED / DRAFT). Non-active
+   *  products get a warning badge so the user knows before adding. */
+  status?: string | null;
   variants: PickerVariant[];
+}
+
+/** Badge label for a non-active product status, or null when active. */
+export function productStatusLabel(status?: string | null): string | null {
+  const s = (status ?? "").toUpperCase();
+  if (s === "ARCHIVED") return "Archived";
+  if (s === "DRAFT") return "Draft";
+  return null;
 }
 
 interface ProductPickerProps {
@@ -120,6 +131,11 @@ export function ProductPicker({
                   <Text as="p" variant="bodyMd" fontWeight="bold">
                     {product.title}
                   </Text>
+                  {productStatusLabel(product.status) && (
+                    <Badge tone="warning">
+                      {productStatusLabel(product.status)!}
+                    </Badge>
+                  )}
                   {selectedCount > 0 && (
                     <Badge tone="info">{`${selectedCount} selected`}</Badge>
                   )}

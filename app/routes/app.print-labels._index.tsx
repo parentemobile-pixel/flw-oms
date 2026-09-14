@@ -43,6 +43,7 @@ import { ProductGrid, type GridCell } from "../components/ProductGrid";
 interface SearchProduct {
   id: string;
   title: string;
+  status?: string | null;
   variants: Array<{
     id: string;
     title: string;
@@ -100,6 +101,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return {
         id: p.id,
         title: p.title,
+        status: p.status ?? null,
         variants: (p.variants.edges as Array<{ node: any }>).map((v) => ({
           id: v.node.id,
           title: v.node.title,

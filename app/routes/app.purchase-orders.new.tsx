@@ -54,6 +54,7 @@ import {
 } from "../services/shopify-api/locations.server";
 import { LocationPicker } from "../components/LocationPicker";
 import { MoneyField } from "../components/MoneyField";
+import { productStatusLabel } from "../components/ProductPicker";
 
 // Types for product/variant data from Shopify
 interface ShopifyVariant {
@@ -74,6 +75,7 @@ interface ShopifyProduct {
   id: string;
   title: string;
   vendor: string;
+  status?: string;
   featuredImage: { url: string; altText: string | null } | null;
   variants: { edges: Array<{ node: ShopifyVariant }> };
 }
@@ -863,6 +865,11 @@ export default function NewPurchaseOrder() {
                                 >
                                   {product.title}
                                 </Text>
+                                {productStatusLabel(product.status) && (
+                                  <Badge tone="warning">
+                                    {productStatusLabel(product.status)!}
+                                  </Badge>
+                                )}
                                 {selectedCount > 0 && (
                                   <Badge tone="info">
                                     {`${selectedCount} selected`}
@@ -1570,6 +1577,10 @@ function GridView({
                 (sum, item) => sum + item.unitCost * item.quantityOrdered,
                 0,
               );
+              const rowUnits = Object.values(row.bySize).reduce(
+                (sum, item) => sum + item.quantityOrdered,
+                0,
+              );
 
               return (
                 <tr
@@ -1672,6 +1683,9 @@ function GridView({
                     }}
                   >
                     ${rowTotal.toFixed(2)}
+                    <div style={{ fontSize: "11px", color: "#6b7280" }}>
+                      {rowUnits} unit{rowUnits !== 1 ? "s" : ""}
+                    </div>
                   </td>
                 </tr>
               );

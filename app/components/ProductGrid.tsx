@@ -145,6 +145,22 @@ interface ProductGridProps {
   availableVariantBySize?: Map<string, string>;
   onAddCell?: (variantId: string) => void;
   /**
+   * Optional subtext rendered under the "+" affordance of an addable
+   * (unselected) size cell. Replenishment uses it to show the stock at
+   * each location for sizes that didn't sell, so the user sees the
+   * whole product's position, not just the sold sizes.
+   */
+  getAddCellSubtext?: (variantId: string) => ReactNode;
+  /**
+   * Fit the table to the container width instead of letting it grow
+   * and scroll horizontally. Size columns shrink to share the
+   * available width (fixed table layout) and the wrapper never
+   * becomes a horizontal scroll container — so a trackpad swipe can't
+   * be mistaken for browser back-navigation. Replenishment sets this;
+   * PO / Transfer grids keep the scrolling behavior.
+   */
+  fitWidth?: boolean;
+  /**
    * Turn the grid itself into a vertical scrollbox with this max
    * height (any CSS length: "600px", "70vh", etc). Needed for
    * `position: sticky` on thead to actually pin the size columns
@@ -228,6 +244,8 @@ export function ProductGrid({
   onRemoveRow,
   availableVariantBySize,
   onAddCell,
+  getAddCellSubtext,
+  fitWidth = false,
   maxHeight,
   stickyLeadColumn = false,
 }: ProductGridProps) {
@@ -317,7 +335,10 @@ export function ProductGrid({
   return (
     <div
       style={{
-        overflowX: "auto",
+        overflowX: fitWidth ? "hidden" : "auto",
+        // Never let a horizontal over-scroll inside the grid bubble up
+        // into the browser's swipe-to-go-back gesture.
+        overscrollBehaviorX: "contain",
         // Turn the wrapper into a real vertical scroll container so
         // the thead's `position: sticky` has something to pin to.
         // Without this the header scrolls off with the page.
@@ -331,6 +352,7 @@ export function ProductGrid({
           width: "100%",
           borderCollapse: "collapse",
           fontSize: "13px",
+          ...(fitWidth ? { tableLayout: "fixed" } : {}),
         }}
       >
         {/* Sticky header so size columns stay visible as the user
@@ -350,7 +372,7 @@ export function ProductGrid({
               style={{
                 padding: "8px",
                 textAlign: "left",
-                minWidth: "240px",
+                ...(fitWidth ? { width: "22%" } : { minWidth: "240px" }),
                 borderBottom: "2px solid #e1e3e5",
                 ...leadTh,
               }}
@@ -377,14 +399,21 @@ export function ProductGrid({
                   textAlign: "center",
                   // Wide enough for 3-digit counts (e.g. "100") plus the
                   // number input's up/down spinner buttons without the
-                  // digit getting clipped.
-                  minWidth: "88px",
+                  // digit getting clipped. In fit-width mode the
+                  // columns share the remaining width instead.
+                  ...(fitWidth ? {} : { minWidth: "88px" }),
                 }}
               >
                 {size}
               </th>
             ))}
-            <th style={{ padding: "8px", textAlign: "right" }}>
+            <th
+              style={{
+                padding: "8px",
+                textAlign: "right",
+                ...(fitWidth ? { width: "150px" } : {}),
+              }}
+            >
               {trailingLabel}
             </th>
           </tr>
@@ -623,6 +652,22 @@ export function ProductGrid({
                           >
                             +
                           </button>
+                          {(() => {
+                            const addSub = getAddCellSubtext?.(availableId);
+                            return addSub != null ? (
+                              <div
+                                style={{
+                                  fontSize: "11px",
+                                  color: "#6b7280",
+                                  textAlign: "center",
+                                  marginTop: "2px",
+                                  lineHeight: 1.2,
+                                }}
+                              >
+                                {addSub}
+                              </div>
+                            ) : null;
+                          })()}
                         </td>
                       );
                     }
