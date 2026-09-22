@@ -209,6 +209,36 @@ model InventoryTransferLineItem {
 }
 
 // ============================================
+// CYCLE COUNT — rolling "last counted" per variant per location
+// ============================================
+// One row per (shop, location, variant). Written every time a row is
+// saved on the Stock Counts page, whether or not Shopify needed an
+// adjustment. Powers the "Not counted in N days" view and the
+// last-counted cell subtext. Product/variant fields are snapshots so
+// the stale report can name things without a catalog lookup.
+model VariantLocationCount {
+  id               String   @id @default(cuid())
+  shop             String
+  locationId       String
+  shopifyVariantId String
+  shopifyProductId String
+  productTitle     String
+  variantTitle     String
+  vendor           String?
+  sku              String?
+  barcode          String?
+  lastCountedAt    DateTime
+  lastCountedQty   Int
+  previousQty      Int // Shopify `available` right before the save
+  countedBy        String?
+  sessionId        String? // InventoryAdjustmentSession.id when a delta was applied
+  updatedAt        DateTime @updatedAt
+
+  @@unique([shop, locationId, shopifyVariantId])
+  @@index([shop, locationId, lastCountedAt])
+}
+
+// ============================================
 // INVENTORY ADJUSTMENTS (audit log)
 // ============================================
 // A "session" is one grid-based batch adjust (inventory correction, cycle count

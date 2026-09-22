@@ -30,6 +30,7 @@ const ON_HAND_PRODUCTS_QUERY = `#graphql
                 id
                 title
                 sku
+                barcode
                 selectedOptions { name value }
               }
             }
@@ -53,6 +54,7 @@ interface RawProduct {
         id: string;
         title: string;
         sku: string | null;
+        barcode: string | null;
         selectedOptions: Array<{ name: string; value: string }>;
       };
     }>;
@@ -67,6 +69,11 @@ export interface OnHandCell {
   sku: string | null;
   selectedOptions: Array<{ name: string; value: string }>;
   onHand: number;
+  // Extra fields used by the Stock Counts page (optional so the On Hand
+  // page and any other caller keep working unchanged).
+  vendor?: string | null;
+  barcode?: string | null;
+  inventoryItemId?: string | null;
 }
 
 export interface OnHandResult {
@@ -119,6 +126,12 @@ export async function fetchOnHandAtLocation(
     locationGid: string;
     search: string;
     tags: string[];
+    /**
+     * Keep variants whose available at the location is <= 0 (default
+     * false). Stock Counts uses this so a phantom at 0 / negative can
+     * still be found and verified.
+     */
+    includeZeroStock?: boolean;
   },
 ): Promise<OnHandResult> {
   const query = buildProductsSearchQuery(options.search, options.tags);
@@ -160,6 +173,8 @@ export async function fetchOnHandAtLocation(
       productTitle: string;
       variantTitle: string;
       sku: string | null;
+      barcode: string | null;
+      vendor: string | null;
       selectedOptions: Array<{ name: string; value: string }>;
     }
   >();
@@ -172,6 +187,8 @@ export async function fetchOnHandAtLocation(
         productTitle: p.title,
         variantTitle: v.title,
         sku: v.sku,
+        barcode: v.barcode ?? null,
+        vendor: p.vendor ?? null,
         selectedOptions: v.selectedOptions ?? [],
       });
     }
@@ -185,7 +202,7 @@ export async function fetchOnHandAtLocation(
   for (const [variantId, inv] of invMap.entries()) {
     const level = inv.levels.find((l) => l.locationId === options.locationGid);
     const available = level?.quantities.available ?? 0;
-    if (available <= 0) continue;
+    if (available <= 0 && !options.includeZeroStock) continue;
     const meta = variantMeta.get(variantId);
     if (!meta) continue;
     cells.push({
@@ -196,9 +213,12 @@ export async function fetchOnHandAtLocation(
       sku: meta.sku,
       selectedOptions: meta.selectedOptions,
       onHand: available,
+      vendor: meta.vendor,
+      barcode: meta.barcode,
+      inventoryItemId: inv.inventoryItemId,
     });
     productsWithStock.add(meta.productId);
-    totalUnits += available;
+    if (available > 0) totalUnits += available;
   }
 
   return {

@@ -292,24 +292,13 @@ Small, isolated.
 
 **Files:** `app/routes/app.print-labels._index.tsx` (new), `app/routes/api.labels.adhoc.tsx` (new POST endpoint — `{variantId, quantity}` → PDF)
 
-### Module 7 — Stock Count
-New module. Foolproof UI is the key requirement ("people lose track of where they are").
-- **Create count session:** name, location → generates a `StockCountLineItem` per variant at that location (pulls expected qty from Shopify at create time — snapshot)
-- **Count UI:** 
-  - Big search / scan box at top
-  - Scrollable list of variants grouped by product, showing: image, title, variant, expected qty, **counted qty field**
-  - Counted items get a green check + move to "Counted" section (collapsed by default)
-  - Uncounted items stay in "Remaining" section — always easy to see what's left
-  - Auto-save on each count entry (debounced)
-  - **Can pause and resume** — close tab, come back later, progress is saved
-  - Mobile-first: each line is a big touch target, scanner input at top always focused
-- **Complete count:**
-  - Shows variance report: expected vs counted, $ impact at cost
-  - Uncounted items list with "archive these?" action (likely dead SKUs)
-  - "Apply to Shopify" — generates `InventoryAdjustmentSession` with reason `cycle_count_accuracy`, applies deltas
-- Archived/abandoned counts kept for history
-
-**Files:** `app/routes/app.stock-counts.*`, `app/services/stock-counts/*.server.ts`
+### Module 7 — Stock Count (reworked Sept 2026: rolling cycle count)
+The session-based flow (create → count → complete) was replaced by a location-scoped rolling count at `/app/stock-counts`.
+- **Load** every variant with stock at a location (`fetchOnHandAtLocation`, cached 5 min) joined with `VariantLocationCount` (last counted per variant per location).
+- **Sizes-as-columns grid** (`ProductGrid`): row = product + colour, cells prefilled with live qty; scanner tallies +1 per scan.
+- **Save row** writes Shopify immediately for any cell whose count differs (`saveCycleCounts` → `adjustInventoryBatch`, reason `cycle_count_available`, audited as `InventoryAdjustmentSession.source = "cycle_count"`) and stamps every cell in the row as counted.
+- **Not counted in N days** tab (7/30/60/90) lists stale rows never-first, with a **Zero row** action for phantom stock.
+- The old `StockCount` / `StockCountLineItem` tables remain for history; the migration backfilled their freshest `countedAt` into `VariantLocationCount`.
 
 ### Module 8 — Inventory Planning
 The hard one. Built **last** because it depends on sales-data sync maturity. Product-by-product table (per user preference).

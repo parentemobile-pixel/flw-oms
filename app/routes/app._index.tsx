@@ -51,7 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 const SECONDARY_LINKS: Array<{ label: string; url: string; hint: string }> = [
   { label: "On Hand", url: "/app/on-hand", hint: "Grid of what's in stock at a location" },
   { label: "Inventory Adjust", url: "/app/adjust", hint: "Correct stock levels with a reason code" },
-  { label: "Stock Counts", url: "/app/stock-counts", hint: "Cycle counts + reconciliation" },
+  { label: "Stock Counts", url: "/app/stock-counts", hint: "Rolling cycle counts + not-counted report" },
   { label: "Forecast", url: "/app/forecast", hint: "Demand forecast + suggested reorder quantities" },
   { label: "Planning", url: "/app/planning", hint: "Trailing sales + suggested order table" },
   { label: "Reports", url: "/app/reports", hint: "Inventory value trend + snapshots" },

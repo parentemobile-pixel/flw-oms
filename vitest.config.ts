@@ -9,6 +9,10 @@ export default defineConfig({
   plugins: [tsconfigPaths()],
   test: {
     environment: "node",
-    include: ["app/services/forecast/**/*.test.ts"],
+    include: [
+      "app/services/forecast/**/*.test.ts",
+      "app/services/stock-counts/**/*.test.ts",
+      "app/services/barcodes/**/*.test.ts",
+    ],
   },
 });

@@ -61,6 +61,13 @@ export const CACHE_TTL = {
   PUBLICATIONS: 60 * 12, // rarely changes
   METAFIELD_DEFINITIONS: 60 * 12,
   LOCATIONS: 60 * 24, // almost never changes
+  // Stock Counts: the per-location catalog walk is slow (seconds), but
+  // row saves patch the client state directly, so a short cache keeps
+  // reloads snappy without going stale in a way that matters.
+  CYCLE_ROWS: 5,
+  // Product Issues: the full scan is expensive and every fix patches the
+  // cached report in place, so the report lives until the user rescans.
+  PRODUCT_ISSUES: 60 * 24 * 7,
 } as const;
 
 /** Standard cache keys — using constants keeps usages consistent */
@@ -71,4 +78,39 @@ export const CACHE_KEYS = {
   METAFIELD_DEFINITIONS: "metafield_definitions",
   LOCATIONS: "locations",
   OPTION_VALUES: "option_values",
+  PRODUCT_ISSUES: "product_issues",
+  cycleRows: (locationId: string, includeZeroStock: boolean) =>
+    `cycle_rows:${locationId}:${includeZeroStock ? "all" : "instock"}`,
 } as const;
+
+/**
+ * Read a cached value without a fetcher. Returns null on miss / expiry /
+ * corrupt JSON. Used where the page should render instantly and let the
+ * user decide when to run the expensive refresh.
+ */
+export async function peekCached<T>(shop: string, key: string): Promise<T | null> {
+  const row = await db.shopifyCache.findUnique({
+    where: { shop_key: { shop, key } },
+  });
+  if (!row || row.expiresAt.getTime() <= Date.now()) return null;
+  try {
+    return JSON.parse(row.value) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Write a value into the cache directly (e.g. after patching a report). */
+export async function setCached<T>(
+  shop: string,
+  key: string,
+  ttlMinutes: number,
+  value: T,
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
+  await db.shopifyCache.upsert({
+    where: { shop_key: { shop, key } },
+    create: { shop, key, value: JSON.stringify(value), expiresAt },
+    update: { value: JSON.stringify(value), expiresAt },
+  });
+}
