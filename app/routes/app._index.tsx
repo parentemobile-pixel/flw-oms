@@ -55,7 +55,7 @@ const SECONDARY_LINKS: Array<{ label: string; url: string; hint: string }> = [
   { label: "Forecast", url: "/app/forecast", hint: "Demand forecast + suggested reorder quantities" },
   { label: "Planning", url: "/app/planning", hint: "Trailing sales + suggested order table" },
   { label: "Reports", url: "/app/reports", hint: "Inventory value trend + snapshots" },
-  { label: "Barcode Check", url: "/app/barcodes", hint: "Audit + generate missing barcodes" },
+  { label: "Product Issues", url: "/app/product-issues", hint: "Duplicate/missing barcodes, negative stock, missing cost" },
   { label: "Products", url: "/app/products", hint: "Bulk vendor, cost, tag, archive" },
 ];
 

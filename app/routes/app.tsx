@@ -58,7 +58,7 @@ export default function App() {
         <Link to="/app/forecast">Forecast</Link>
         <Link to="/app/reports">Reports</Link>
         <Link to="/app/print-labels">Print Labels</Link>
-        <Link to="/app/barcodes">Barcode Check</Link>
+        <Link to="/app/product-issues">Product Issues</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>

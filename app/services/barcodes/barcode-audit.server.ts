@@ -31,15 +31,12 @@ export interface BarcodeAuditReport {
 }
 
 /**
- * Walk the entire catalog and classify every variant. Safe to call often —
- * just reads from Shopify, no mutations. The full walk scales with variant
- * count; expect a few seconds for a store with thousands of SKUs.
+ * Pure classification of a variant list into missing / duplicate /
+ * healthy buckets. Shared by Barcode Check and Product Issues.
  */
-export async function runBarcodeAudit(
-  admin: AdminApiContext,
-): Promise<BarcodeAuditReport> {
-  const variants = await getAllVariantsForBarcodeAudit(admin);
-
+export function classifyBarcodes(
+  variants: AuditVariant[],
+): Omit<BarcodeAuditReport, "variants"> {
   const missing: AuditVariant[] = [];
   const byBarcode = new Map<string, AuditVariant[]>();
 
@@ -70,7 +67,6 @@ export async function runBarcodeAudit(
   );
 
   return {
-    variants,
     missing,
     duplicates,
     healthy,
@@ -85,6 +81,18 @@ export async function runBarcodeAudit(
       healthy: healthy.length,
     },
   };
+}
+
+/**
+ * Walk the entire catalog and classify every variant. Safe to call often —
+ * just reads from Shopify, no mutations. The full walk scales with variant
+ * count; expect a few seconds for a store with thousands of SKUs.
+ */
+export async function runBarcodeAudit(
+  admin: AdminApiContext,
+): Promise<BarcodeAuditReport> {
+  const variants = await getAllVariantsForBarcodeAudit(admin);
+  return { variants, ...classifyBarcodes(variants) };
 }
 
 /**

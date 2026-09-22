@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { useFetcher, useLoaderData } from "@remix-run/react";
+import { useFetcher, useLoaderData, useSearchParams } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -138,7 +138,10 @@ export default function PrintLabels() {
   const stockFetcher = useFetcher<typeof action>();
   const isSearching = searchFetcher.state !== "idle";
 
-  const [query, setQuery] = useState("");
+  // `?q=` pre-fills the search (Product Issues links here with the SKU
+  // of a variant that needs a fresh label).
+  const [searchParams] = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
   const [products, setProducts] = useState<SearchProduct[]>([]);
   const [selected, setSelected] = useState<SelectedVariant[]>([]);
   // Per-variant label quantities. `null` = user hasn't set anything;

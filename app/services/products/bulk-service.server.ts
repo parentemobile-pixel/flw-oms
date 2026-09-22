@@ -45,7 +45,12 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-async function writeSession(
+/**
+ * Persist a ProductBulkActionSession + its per-product change rows.
+ * Exported so other modules (Product Issues) can audit their product
+ * edits in the same log the Products page shows.
+ */
+export async function recordBulkSession(
   shop: string,
   action: BulkAction,
   notes: string | null,
@@ -144,7 +149,7 @@ export async function bulkChangeVendor(
     changes.push(...results);
   }
 
-  const sessionId = await writeSession(shop, "change_vendor", notes, createdBy, changes);
+  const sessionId = await recordBulkSession(shop, "change_vendor", notes, createdBy, changes);
   return summarize(sessionId, changes);
 }
 
@@ -198,7 +203,7 @@ export async function bulkArchive(
     changes.push(...results);
   }
 
-  const sessionId = await writeSession(shop, "archive", notes, createdBy, changes);
+  const sessionId = await recordBulkSession(shop, "archive", notes, createdBy, changes);
   return summarize(sessionId, changes);
 }
 
@@ -270,7 +275,7 @@ export async function bulkEditTags(
     changes.push(...results);
   }
 
-  const sessionId = await writeSession(shop, "edit_tags", notes, createdBy, changes);
+  const sessionId = await recordBulkSession(shop, "edit_tags", notes, createdBy, changes);
   return summarize(sessionId, changes);
 }
 
@@ -375,7 +380,7 @@ export async function bulkSetCogs(
     changes.push(...results);
   }
 
-  const sessionId = await writeSession(shop, "set_cogs", notes, createdBy, changes);
+  const sessionId = await recordBulkSession(shop, "set_cogs", notes, createdBy, changes);
   return summarize(sessionId, changes);
 }
 

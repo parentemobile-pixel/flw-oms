@@ -1512,6 +1512,7 @@ const BARCODE_AUDIT_QUERY = `#graphql
                 title
                 sku
                 barcode
+                inventoryItem { id unitCost { amount } }
               }
             }
           }
@@ -1531,6 +1532,10 @@ export interface AuditVariant {
   status: string;
   sku: string | null;
   barcode: string | null;
+  /** Inventory item gid — needed for per-location adjustments. */
+  inventoryItemId: string | null;
+  /** Unit cost (COGS); null when never set, 0 when explicitly zero. */
+  unitCost: number | null;
 }
 
 /**
@@ -1565,6 +1570,11 @@ export async function getAllVariantsForBarcodeAudit(
           status: p.status,
           sku: v.sku ?? null,
           barcode: v.barcode ?? null,
+          inventoryItemId: v.inventoryItem?.id ?? null,
+          unitCost:
+            v.inventoryItem?.unitCost?.amount != null
+              ? parseFloat(v.inventoryItem.unitCost.amount)
+              : null,
         });
       }
     }
