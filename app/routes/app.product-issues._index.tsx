@@ -46,6 +46,7 @@ import {
 } from "../services/products/product-issues.server";
 import type { AuditVariant } from "../services/shopify-api/products.server";
 import { MoneyField } from "../components/MoneyField";
+import { ProductGrid, type GridCell } from "../components/ProductGrid";
 import { relativeTime } from "../utils/relative-time";
 
 const TAB_IDS = [
@@ -199,6 +200,50 @@ function matchesFilter(v: AuditVariant, q: string): boolean {
     (v.barcode ?? "").toLowerCase().includes(q)
   );
 }
+
+const SIZE_TOKENS = new Set([
+  "XXS", "XS", "S", "M", "L", "XL", "2XL", "XXL", "3XL", "XXXL", "4XL", "OS", "ONE SIZE",
+]);
+
+/**
+ * Options for the grid. Reports scanned before `selectedOptions` was
+ * added fall back to splitting the variant title on " / " and treating
+ * any size-looking segment as the Size option.
+ */
+function optionsFor(v: AuditVariant): Array<{ name: string; value: string }> {
+  if (v.selectedOptions && v.selectedOptions.length > 0) return v.selectedOptions;
+  if (!v.variantTitle || v.variantTitle === "Default Title") return [];
+  return v.variantTitle.split(" / ").map((seg) => {
+    const t = seg.trim();
+    const isSize = SIZE_TOKENS.has(t.toUpperCase()) || /^\d{1,2}$/.test(t);
+    return { name: isSize ? "Size" : "Option", value: t };
+  });
+}
+
+function toGridCell(v: AuditVariant, value: number | null): GridCell {
+  return {
+    variantId: v.variantId,
+    productId: v.productId,
+    productTitle: v.productTitle,
+    variantTitle: v.variantTitle,
+    selectedOptions: optionsFor(v),
+    sku: v.sku,
+    value,
+  };
+}
+
+function rowKeyOf(cells: GridCell[]): string {
+  const first = cells[0];
+  if (!first) return "";
+  const nonSize = first.selectedOptions
+    .filter((o) => o.name.toLowerCase() !== "size")
+    .map((o) => o.value)
+    .join(" / ");
+  return `${first.productId}::${nonSize}`;
+}
+
+const GRID_SIZES = ["XS", "S", "M", "L", "XL", "2XL"];
+const ROW_LIMIT = 150; // cells per page — keeps the DOM light on big lists
 
 const th: React.CSSProperties = { padding: "6px 8px", textAlign: "left" };
 const td: React.CSSProperties = { padding: "6px 8px", verticalAlign: "middle" };
@@ -647,18 +692,20 @@ function MissingBarcodesPanel({
   isBusy: boolean;
 }) {
   const submit = useSubmit();
+  const [confirmAll, setConfirmAll] = useState(false);
+  const [limit, setLimit] = useState(ROW_LIMIT);
   const rows = useMemo(
     () => report.missingBarcodes.filter((v) => matchesFilter(v, q)),
     [report.missingBarcodes, q],
   );
-  const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(report.missingBarcodes.map((v) => v.variantId)),
+  const byId = useMemo(
+    () => new Map(report.missingBarcodes.map((v) => [v.variantId, v])),
+    [report.missingBarcodes],
   );
-  // Keep selection in sync when the report shrinks after a fix.
-  useEffect(() => {
-    const ids = new Set(report.missingBarcodes.map((v) => v.variantId));
-    setSelected((prev) => new Set([...prev].filter((id) => ids.has(id))));
-  }, [report.missingBarcodes]);
+  const cells = useMemo(
+    () => rows.slice(0, limit).map((v) => toGridCell(v, null)),
+    [rows, limit],
+  );
 
   if (report.missingBarcodes.length === 0) {
     return (
@@ -668,90 +715,102 @@ function MissingBarcodesPanel({
     );
   }
 
-  const toggle = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  const handleFix = () => {
-    const targets = report.missingBarcodes
-      .filter((v) => selected.has(v.variantId))
-      .map((v) => ({ variantId: v.variantId, productId: v.productId }));
-    if (targets.length === 0) return;
+  const generateAll = () => {
     const fd = new FormData();
     fd.set("intent", "fixMissingBarcodes");
-    fd.set("targets", JSON.stringify(targets));
+    fd.set(
+      "targets",
+      JSON.stringify(
+        report.missingBarcodes.map((v) => ({ variantId: v.variantId, productId: v.productId })),
+      ),
+    );
     submit(fd, { method: "post" });
+    setConfirmAll(false);
   };
 
   return (
     <BlockStack gap="300">
       <InlineStack align="space-between" blockAlign="center" wrap>
         <Text as="p">
-          {selected.size} of {report.missingBarcodes.length} selected
+          {report.counts.missingBarcodes} size
+          {report.counts.missingBarcodes === 1 ? "" : "s"} without a barcode.
+          Generate per row, or all at once.
         </Text>
-        <ButtonGroup>
-          <Button
-            size="slim"
-            onClick={() => setSelected(new Set(report.missingBarcodes.map((v) => v.variantId)))}
-          >
-            Select all
-          </Button>
-          <Button size="slim" onClick={() => setSelected(new Set())}>
-            Clear
-          </Button>
-          <Button
-            variant="primary"
-            onClick={handleFix}
-            loading={isBusy}
-            disabled={selected.size === 0 || isBusy}
-          >
-            {`Generate ${selected.size || ""} barcode${selected.size !== 1 ? "s" : ""}`}
-          </Button>
-        </ButtonGroup>
+        <Button variant="primary" onClick={() => setConfirmAll(true)} disabled={isBusy}>
+          {`Generate all ${report.counts.missingBarcodes}`}
+        </Button>
       </InlineStack>
       <Divider />
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-          <thead>
-            <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-              <th style={{ ...th, width: "32px" }}></th>
-              <th style={th}>Product</th>
-              <th style={th}>Variant</th>
-              <th style={th}>SKU</th>
-              <th style={th}>Vendor</th>
-              <th style={th}>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((v) => (
-              <tr key={v.variantId} style={{ borderBottom: "1px solid #f1f1f1" }}>
-                <td style={{ padding: "4px" }}>
-                  <Checkbox
-                    label=""
-                    labelHidden
-                    checked={selected.has(v.variantId)}
-                    onChange={() => toggle(v.variantId)}
-                  />
-                </td>
-                <td style={td}>
-                  <AdminLink href={productAdminUrl(v.productId)}>{v.productTitle}</AdminLink>
-                </td>
-                <td style={td}>{v.variantTitle}</td>
-                <td style={td}>{v.sku || "—"}</td>
-                <td style={td}>{v.vendor || "—"}</td>
-                <td style={td}>
-                  <Badge tone={v.status === "ACTIVE" ? "success" : "info"}>
-                    {v.status.toLowerCase()}
-                  </Badge>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <ProductGrid
+        cells={cells}
+        qtyLabel="Barcode"
+        readonly
+        onCellChange={() => {}}
+        showColumns={{ cost: false, retail: false, stock: false, onOrder: false }}
+        sizeColumns={GRID_SIZES}
+        getCellStyle={() => ({ background: "#fff4e5", boxShadow: "inset 0 0 0 1px #f0b76a" })}
+        getCellSubtext={() => <span style={{ color: "#b45309" }}>missing</span>}
+        stickyLeadColumn
+        maxHeight="70vh"
+        trailingLabel="Action"
+        renderRowTrailing={({ cells: rowCells }) => (
+          <BarcodeRowActions
+            targets={rowCells
+              .map((c) => byId.get(c.variantId))
+              .filter((v): v is AuditVariant => !!v)
+              .map((v) => ({ variantId: v.variantId, productId: v.productId }))}
+          />
+        )}
+      />
+      {rows.length > limit && (
+        <InlineStack align="center">
+          <Button onClick={() => setLimit((l) => l + ROW_LIMIT)}>
+            {`Show ${Math.min(ROW_LIMIT, rows.length - limit)} more (${rows.length - limit} left)`}
+          </Button>
+        </InlineStack>
+      )}
+
+      <Modal
+        open={confirmAll}
+        onClose={() => setConfirmAll(false)}
+        title="Generate barcodes for every missing size?"
+        primaryAction={{ content: "Generate all", onAction: generateAll }}
+        secondaryActions={[{ content: "Cancel", onAction: () => setConfirmAll(false) }]}
+      >
+        <Modal.Section>
+          <Text as="p">
+            {report.counts.missingBarcodes} variants get a fresh FLW barcode written
+            to Shopify. You&apos;ll want to print labels for them afterwards.
+          </Text>
+        </Modal.Section>
+      </Modal>
+    </BlockStack>
+  );
+}
+
+function BarcodeRowActions({
+  targets,
+}: {
+  targets: Array<{ variantId: string; productId: string }>;
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const run = () => {
+    const fd = new FormData();
+    fd.set("intent", "fixMissingBarcodes");
+    fd.set("targets", JSON.stringify(targets));
+    fetcher.submit(fd, { method: "post" });
+  };
+  return (
+    <BlockStack gap="100" inlineAlign="end">
+      <Button size="slim" onClick={run} loading={busy} disabled={busy || targets.length === 0}>
+        {`Generate ${targets.length}`}
+      </Button>
+      {fetcher.data && !fetcher.data.ok && (
+        <Text as="span" variant="bodySm" tone="critical">
+          {fetcher.data.error}
+        </Text>
+      )}
     </BlockStack>
   );
 }
@@ -769,19 +828,30 @@ function NegativeStockPanel({
 }) {
   const submit = useSubmit();
   const [confirmResetAll, setConfirmResetAll] = useState(false);
+  // drafts[`${locationId}::${variantId}`] = typed new qty (default 0)
+  const [drafts, setDrafts] = useState<Record<string, number>>({});
   const rows = useMemo(
     () => report.negativeStock.filter((v) => matchesFilter(v, q)),
     [report.negativeStock, q],
   );
-  // Location columns: the report's location list, falling back to
-  // whatever the rows reference (covers a location deactivated mid-way).
-  const locations = useMemo(() => {
+  const byId = useMemo(
+    () => new Map(report.negativeStock.map((v) => [v.variantId, v])),
+    [report.negativeStock],
+  );
+  // One grid per location that has any negative level.
+  const sections = useMemo(() => {
     const seen = new Map(report.locations.map((l) => [l.id, l.name]));
     for (const row of report.negativeStock) {
       for (const l of row.levels) if (!seen.has(l.locationId)) seen.set(l.locationId, l.locationName);
     }
-    return [...seen].map(([id, name]) => ({ id, name }));
-  }, [report.locations, report.negativeStock]);
+    return [...seen]
+      .map(([id, name]) => ({
+        id,
+        name,
+        rows: rows.filter((r) => r.negativeLevels.some((l) => l.locationId === id)),
+      }))
+      .filter((s) => s.rows.length > 0);
+  }, [report.locations, report.negativeStock, rows]);
 
   if (report.negativeStock.length === 0) {
     return (
@@ -806,42 +876,67 @@ function NegativeStockPanel({
   };
 
   return (
-    <BlockStack gap="300">
+    <BlockStack gap="400">
       <InlineStack align="space-between" blockAlign="center" wrap>
         <Text as="p">
-          {report.counts.negativeStock} variant
+          {report.counts.negativeStock} size
           {report.counts.negativeStock === 1 ? "" : "s"} ·{" "}
           {report.counts.negativeLevels} location level
-          {report.counts.negativeLevels === 1 ? "" : "s"} below zero. Type a
-          corrected quantity and Save, reset to 0, or archive the product.
+          {report.counts.negativeLevels === 1 ? "" : "s"} below zero. Cells are
+          prefilled with 0 — type a corrected count where you know it, then
+          <strong> Save row</strong>. Or archive the product.
         </Text>
         <Button tone="critical" onClick={() => setConfirmResetAll(true)} disabled={isBusy}>
           Reset all to 0
         </Button>
       </InlineStack>
-      <Divider />
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-          <thead>
-            <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-              <th style={th}>Product</th>
-              <th style={th}>Variant</th>
-              <th style={th}>SKU</th>
-              {locations.map((l) => (
-                <th key={l.id} style={{ ...th, textAlign: "center" }}>
-                  {l.name}
-                </th>
-              ))}
-              <th style={th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <NegativeRow key={row.variantId} row={row} locations={locations} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {sections.map((sec) => {
+        const cells = sec.rows.map((v) => {
+          const level = v.negativeLevels.find((l) => l.locationId === sec.id)!;
+          const cell = toGridCell(v, drafts[`${sec.id}::${v.variantId}`] ?? 0);
+          cell.stock = level.available;
+          return cell;
+        });
+        return (
+          <BlockStack key={sec.id} gap="200">
+            <Divider />
+            <Text as="h3" variant="headingSm">
+              {sec.name} — {cells.length} size{cells.length === 1 ? "" : "s"} below zero
+            </Text>
+            <ProductGrid
+              cells={cells}
+              qtyLabel="New qty"
+              onCellChange={(variantId, next) =>
+                setDrafts((p) => ({ ...p, [`${sec.id}::${variantId}`]: next }))
+              }
+              showColumns={{ cost: false, retail: false, stock: false, onOrder: false }}
+              sizeColumns={GRID_SIZES}
+              getCellStyle={() => ({ background: "#fdecea", boxShadow: "inset 0 0 0 1px #e0b4b4" })}
+              getCellSubtext={(cell) => (
+                <span style={{ color: "#d72c0d", fontWeight: 600 }}>now {cell.stock}</span>
+              )}
+              stickyLeadColumn
+              maxHeight="60vh"
+              trailingLabel="Action"
+              renderRowTrailing={({ cells: rowCells }) => {
+                const first = byId.get(rowCells[0]?.variantId ?? "");
+                return (
+                  <NegativeRowActions
+                    locationId={sec.id}
+                    productId={first?.productId ?? ""}
+                    productTitle={first?.productTitle ?? ""}
+                    targets={rowCells.map((c) => ({
+                      variantId: c.variantId,
+                      locationId: sec.id,
+                      newQty: drafts[`${sec.id}::${c.variantId}`] ?? 0,
+                    }))}
+                  />
+                );
+              }}
+            />
+          </BlockStack>
+        );
+      })}
 
       <Modal
         open={confirmResetAll}
@@ -864,155 +959,76 @@ function NegativeStockPanel({
   );
 }
 
-function NegativeRow({
-  row,
-  locations,
+function NegativeRowActions({
+  productId,
+  productTitle,
+  targets,
 }: {
-  row: NegativeStockRow;
-  locations: Array<{ id: string; name: string }>;
+  locationId: string;
+  productId: string;
+  productTitle: string;
+  targets: SetStockTarget[];
 }) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const typed = targets.some((t) => t.newQty !== 0);
 
-  const levelAt = (locationId: string) =>
-    row.levels.find((l) => l.locationId === locationId);
-
-  const submitTargets = (targets: SetStockTarget[]) => {
-    if (targets.length === 0) return;
+  const save = () => {
     const fd = new FormData();
     fd.set("intent", "setStock");
     fd.set("targets", JSON.stringify(targets));
     fetcher.submit(fd, { method: "post" });
   };
-  const handleReset = () =>
-    submitTargets(
-      row.negativeLevels.map((l) => ({
-        variantId: row.variantId,
-        locationId: l.locationId,
-        newQty: 0,
-      })),
-    );
-  const parsedDrafts = row.negativeLevels
-    .map((l) => {
-      const raw = drafts[l.locationId];
-      if (raw === undefined || raw.trim() === "") return null;
-      const n = parseInt(raw, 10);
-      if (!Number.isInteger(n) || n < 0) return null;
-      return { locationId: l.locationId, newQty: n };
-    })
-    .filter((d): d is { locationId: string; newQty: number } => d !== null);
-  const handleSave = () =>
-    submitTargets(
-      parsedDrafts.map((d) => ({ variantId: row.variantId, ...d })),
-    );
-  const handleArchive = () => {
+  const archive = () => {
     const fd = new FormData();
     fd.set("intent", "archive");
-    fd.set("productIds", JSON.stringify([row.productId]));
+    fd.set("productIds", JSON.stringify([productId]));
     fetcher.submit(fd, { method: "post" });
     setConfirmArchive(false);
   };
 
   return (
-    <tr style={{ borderBottom: "1px solid #f1f1f1" }}>
-      <td style={td}>
-        <AdminLink href={productAdminUrl(row.productId)}>{row.productTitle}</AdminLink>
-        {row.vendor && (
-          <div style={{ fontSize: "11px", color: "#6b7280" }}>{row.vendor}</div>
-        )}
-      </td>
-      <td style={td}>{row.variantTitle}</td>
-      <td style={td}>{row.sku || "—"}</td>
-      {locations.map((loc) => {
-        const level = levelAt(loc.id);
-        if (!level) {
-          return (
-            <td key={loc.id} style={{ ...td, textAlign: "center", color: "#9ca3af" }}>
-              —
-            </td>
-          );
-        }
-        if (level.available >= 0) {
-          return (
-            <td key={loc.id} style={{ ...td, textAlign: "center" }}>
-              {level.available}
-            </td>
-          );
-        }
-        return (
-          <td key={loc.id} style={{ ...td, textAlign: "center" }}>
-            <div style={{ color: "#d72c0d", fontWeight: 600 }}>{level.available}</div>
-            <div style={{ maxWidth: "90px", margin: "2px auto 0" }}>
-              <TextField
-                label="New qty"
-                labelHidden
-                type="number"
-                min={0}
-                size="slim"
-                value={drafts[loc.id] ?? ""}
-                placeholder="new qty"
-                onChange={(v) => setDrafts((p) => ({ ...p, [loc.id]: v }))}
-                autoComplete="off"
-                disabled={busy}
-              />
-            </div>
-          </td>
-        );
-      })}
-      <td style={{ ...td, textAlign: "right", whiteSpace: "nowrap" }}>
-        <ButtonGroup>
-          <Button
-            size="slim"
-            variant="primary"
-            onClick={handleSave}
-            loading={busy}
-            disabled={busy || parsedDrafts.length === 0}
-          >
-            Save
-          </Button>
-          <Button size="slim" onClick={handleReset} loading={busy} disabled={busy}>
-            Reset to 0
-          </Button>
-          <Button
-            size="slim"
-            tone="critical"
-            variant="plain"
-            onClick={() => setConfirmArchive(true)}
-            disabled={busy}
-          >
-            Archive
-          </Button>
-        </ButtonGroup>
-        {fetcher.data && !fetcher.data.ok && (
-          <div style={{ color: "#d72c0d", fontSize: "11px", marginTop: "4px" }}>
-            {fetcher.data.error}
-          </div>
-        )}
-        <Modal
-          open={confirmArchive}
-          onClose={() => setConfirmArchive(false)}
-          title={`Archive ${row.productTitle}?`}
-          primaryAction={{ content: "Archive product", destructive: true, onAction: handleArchive }}
-          secondaryActions={[{ content: "Cancel", onAction: () => setConfirmArchive(false) }]}
+    <BlockStack gap="100" inlineAlign="end">
+      <ButtonGroup>
+        <Button size="slim" variant="primary" onClick={save} loading={busy} disabled={busy}>
+          {typed ? "Save row" : "Set row to 0"}
+        </Button>
+        <Button
+          size="slim"
+          tone="critical"
+          variant="plain"
+          onClick={() => setConfirmArchive(true)}
+          disabled={busy}
         >
-          <Modal.Section>
-            <Text as="p">
-              Shopify archives at the product level, so every variant of{" "}
-              <strong>{row.productTitle}</strong> will be archived and hidden from
-              sales channels. Inventory numbers are left as they are.
-            </Text>
-          </Modal.Section>
-        </Modal>
-      </td>
-    </tr>
+          Archive
+        </Button>
+      </ButtonGroup>
+      {fetcher.data && !fetcher.data.ok && (
+        <Text as="span" variant="bodySm" tone="critical">
+          {fetcher.data.error}
+        </Text>
+      )}
+      <Modal
+        open={confirmArchive}
+        onClose={() => setConfirmArchive(false)}
+        title={`Archive ${productTitle}?`}
+        primaryAction={{ content: "Archive product", destructive: true, onAction: archive }}
+        secondaryActions={[{ content: "Cancel", onAction: () => setConfirmArchive(false) }]}
+      >
+        <Modal.Section>
+          <Text as="p">
+            Shopify archives at the product level, so every variant of{" "}
+            <strong>{productTitle}</strong> will be archived and hidden from sales
+            channels. Inventory numbers are left as they are.
+          </Text>
+        </Modal.Section>
+      </Modal>
+    </BlockStack>
   );
 }
 
 // ─── Missing cost ─────────────────────────────────────────────────────
-
-const COST_PAGE = 200;
 
 function MissingCostPanel({
   report,
@@ -1024,20 +1040,30 @@ function MissingCostPanel({
   isBusy: boolean;
 }) {
   const submit = useSubmit();
+  // One cost per grid row (product + colour); applied to every size in
+  // the row that's missing a cost. Keyed by row key.
   const [drafts, setDrafts] = useState<Record<string, number>>({});
-  const [limit, setLimit] = useState(COST_PAGE);
+  const [limit, setLimit] = useState(ROW_LIMIT);
   const rows = useMemo(
     () => report.missingCost.filter((v) => matchesFilter(v, q)),
     [report.missingCost, q],
   );
-  const visible = rows.slice(0, limit);
+  const byId = useMemo(
+    () => new Map(report.missingCost.map((v) => [v.variantId, v])),
+    [report.missingCost],
+  );
+  const cells = useMemo(
+    () => rows.slice(0, limit).map((v) => toGridCell(v, null)),
+    [rows, limit],
+  );
 
-  // Drop drafts for rows that have been fixed (report shrank).
+  // Drop drafts whose rows no longer exist (fixed).
   useEffect(() => {
-    const ids = new Set(report.missingCost.map((v) => v.variantId));
+    const live = new Set<string>();
+    for (const v of report.missingCost) live.add(rowKeyOf([toGridCell(v, null)]));
     setDrafts((prev) => {
       const next: Record<string, number> = {};
-      for (const [id, cost] of Object.entries(prev)) if (ids.has(id)) next[id] = cost;
+      for (const [k, c] of Object.entries(prev)) if (live.has(k)) next[k] = c;
       return next;
     });
   }, [report.missingCost]);
@@ -1050,23 +1076,23 @@ function MissingCostPanel({
     );
   }
 
-  const edited = report.missingCost.filter(
-    (v) => (drafts[v.variantId] ?? 0) > 0,
-  );
+  const editedRowKeys = Object.entries(drafts)
+    .filter(([, c]) => c > 0)
+    .map(([k]) => k);
+  const updatesForRows = (keys: Set<string>) =>
+    report.missingCost
+      .filter((v) => keys.has(rowKeyOf([toGridCell(v, null)])))
+      .map((v) => ({
+        productId: v.productId,
+        variantId: v.variantId,
+        cost: drafts[rowKeyOf([toGridCell(v, null)])],
+      }));
   const handleSaveAll = () => {
-    if (edited.length === 0) return;
+    const updates = updatesForRows(new Set(editedRowKeys));
+    if (updates.length === 0) return;
     const fd = new FormData();
     fd.set("intent", "saveCosts");
-    fd.set(
-      "updates",
-      JSON.stringify(
-        edited.map((v) => ({
-          productId: v.productId,
-          variantId: v.variantId,
-          cost: drafts[v.variantId],
-        })),
-      ),
-    );
+    fd.set("updates", JSON.stringify(updates));
     fd.set("applyToProduct", "0");
     submit(fd, { method: "post" });
   };
@@ -1075,50 +1101,59 @@ function MissingCostPanel({
     <BlockStack gap="300">
       <InlineStack align="space-between" blockAlign="center" wrap>
         <Text as="p">
-          {report.counts.missingCost} variant
-          {report.counts.missingCost === 1 ? "" : "s"} without a unit cost. Enter a
-          cost and Save per row, or use &quot;All sizes&quot; to apply one cost to
-          every size of that product still missing one.
+          {report.counts.missingCost} size
+          {report.counts.missingCost === 1 ? "" : "s"} without a unit cost. Enter
+          the cost for a row and <strong>Save row</strong> — it applies to every
+          size in that row shown here. Different costs per size? Set them in
+          Shopify.
         </Text>
         <Button
           variant="primary"
           onClick={handleSaveAll}
           loading={isBusy}
-          disabled={isBusy || edited.length === 0}
+          disabled={isBusy || editedRowKeys.length === 0}
         >
-          Save all edited{edited.length > 0 ? ` (${edited.length})` : ""}
+          {`Save all edited${editedRowKeys.length > 0 ? ` (${editedRowKeys.length})` : ""}`}
         </Button>
       </InlineStack>
       <Divider />
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-          <thead>
-            <tr style={{ borderBottom: "2px solid #e1e3e5" }}>
-              <th style={th}>Product</th>
-              <th style={th}>Variant</th>
-              <th style={th}>SKU</th>
-              <th style={th}>Vendor</th>
-              <th style={{ ...th, textAlign: "right" }}>Current</th>
-              <th style={th}>New cost</th>
-              <th style={th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((v) => (
-              <CostRow
-                key={v.variantId}
-                v={v}
-                draft={drafts[v.variantId] ?? 0}
-                onDraft={(n) => setDrafts((p) => ({ ...p, [v.variantId]: n }))}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <ProductGrid
+        cells={cells}
+        qtyLabel="Cost"
+        readonly
+        onCellChange={() => {}}
+        showColumns={{ cost: false, retail: false, stock: false, onOrder: false }}
+        sizeColumns={GRID_SIZES}
+        getCellStyle={() => ({ background: "#fff8dc", boxShadow: "inset 0 0 0 1px #e6cf7a" })}
+        getCellSubtext={(cell) => {
+          const v = byId.get(cell.variantId);
+          return (
+            <span style={{ color: "#b45309" }}>
+              {v?.unitCost === 0 ? "$0.00" : "no cost"}
+            </span>
+          );
+        }}
+        stickyLeadColumn
+        maxHeight="70vh"
+        trailingLabel="Cost for row"
+        renderRowTrailing={({ cells: rowCells }) => {
+          const key = rowKeyOf(rowCells);
+          return (
+            <CostRowActions
+              draft={drafts[key] ?? 0}
+              onDraft={(n) => setDrafts((p) => ({ ...p, [key]: n }))}
+              updates={rowCells
+                .map((c) => byId.get(c.variantId))
+                .filter((v): v is AuditVariant => !!v)
+                .map((v) => ({ productId: v.productId, variantId: v.variantId }))}
+            />
+          );
+        }}
+      />
       {rows.length > limit && (
         <InlineStack align="center">
-          <Button onClick={() => setLimit((l) => l + COST_PAGE)}>
-            {`Show ${Math.min(COST_PAGE, rows.length - limit)} more (${rows.length - limit} left)`}
+          <Button onClick={() => setLimit((l) => l + ROW_LIMIT)}>
+            {`Show ${Math.min(ROW_LIMIT, rows.length - limit)} more (${rows.length - limit} left)`}
           </Button>
         </InlineStack>
       )}
@@ -1126,63 +1161,46 @@ function MissingCostPanel({
   );
 }
 
-function CostRow({
-  v,
+function CostRowActions({
   draft,
   onDraft,
+  updates,
 }: {
-  v: AuditVariant;
   draft: number;
   onDraft: (n: number) => void;
+  updates: Array<{ productId: string; variantId: string }>;
 }) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
-  const save = (applyToProduct: boolean) => {
+  const save = () => {
     if (!(draft > 0)) return;
     const fd = new FormData();
     fd.set("intent", "saveCosts");
-    fd.set(
-      "updates",
-      JSON.stringify([{ productId: v.productId, variantId: v.variantId, cost: draft }]),
-    );
-    fd.set("applyToProduct", applyToProduct ? "1" : "0");
+    fd.set("updates", JSON.stringify(updates.map((u) => ({ ...u, cost: draft }))));
+    fd.set("applyToProduct", "0");
     fetcher.submit(fd, { method: "post" });
   };
   return (
-    <tr style={{ borderBottom: "1px solid #f1f1f1" }}>
-      <td style={td}>
-        <AdminLink href={productAdminUrl(v.productId)}>{v.productTitle}</AdminLink>
-      </td>
-      <td style={td}>{v.variantTitle}</td>
-      <td style={td}>{v.sku || "—"}</td>
-      <td style={td}>{v.vendor || "—"}</td>
-      <td style={{ ...td, textAlign: "right", color: "#6b7280" }}>
-        {v.unitCost === null ? "—" : `$${v.unitCost.toFixed(2)}`}
-      </td>
-      <td style={{ ...td, width: "130px" }}>
-        <MoneyField label="Cost" value={draft} onChange={onDraft} disabled={busy} />
-      </td>
-      <td style={{ ...td, textAlign: "right", whiteSpace: "nowrap" }}>
-        <ButtonGroup>
-          <Button
-            size="slim"
-            variant="primary"
-            onClick={() => save(false)}
-            loading={busy}
-            disabled={busy || !(draft > 0)}
-          >
-            Save
-          </Button>
-          <Button size="slim" onClick={() => save(true)} disabled={busy || !(draft > 0)}>
-            All sizes
-          </Button>
-        </ButtonGroup>
-        {fetcher.data && !fetcher.data.ok && (
-          <div style={{ color: "#d72c0d", fontSize: "11px", marginTop: "4px" }}>
-            {fetcher.data.error}
-          </div>
-        )}
-      </td>
-    </tr>
+    <BlockStack gap="100" inlineAlign="end">
+      <InlineStack gap="100" blockAlign="center" wrap={false}>
+        <div style={{ width: "110px" }}>
+          <MoneyField label="Cost" value={draft} onChange={onDraft} disabled={busy} />
+        </div>
+        <Button
+          size="slim"
+          variant="primary"
+          onClick={save}
+          loading={busy}
+          disabled={busy || !(draft > 0)}
+        >
+          Save row
+        </Button>
+      </InlineStack>
+      {fetcher.data && !fetcher.data.ok && (
+        <Text as="span" variant="bodySm" tone="critical">
+          {fetcher.data.error}
+        </Text>
+      )}
+    </BlockStack>
   );
 }

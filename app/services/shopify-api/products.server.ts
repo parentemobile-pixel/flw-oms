@@ -1512,6 +1512,7 @@ const BARCODE_AUDIT_QUERY = `#graphql
                 title
                 sku
                 barcode
+                selectedOptions { name value }
                 inventoryItem { id unitCost { amount } }
               }
             }
@@ -1536,6 +1537,9 @@ export interface AuditVariant {
   inventoryItemId: string | null;
   /** Unit cost (COGS); null when never set, 0 when explicitly zero. */
   unitCost: number | null;
+  /** Variant options — drives the sizes-as-columns grid. Optional because
+   * reports cached before this field existed won't carry it. */
+  selectedOptions?: Array<{ name: string; value: string }>;
 }
 
 /**
@@ -1570,6 +1574,7 @@ export async function getAllVariantsForBarcodeAudit(
           status: p.status,
           sku: v.sku ?? null,
           barcode: v.barcode ?? null,
+          selectedOptions: v.selectedOptions ?? [],
           inventoryItemId: v.inventoryItem?.id ?? null,
           unitCost:
             v.inventoryItem?.unitCost?.amount != null
