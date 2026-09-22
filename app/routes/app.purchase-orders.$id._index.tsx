@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
 import {
@@ -49,6 +49,7 @@ import {
   searchProducts,
   searchProductsByVendor,
 } from "../services/shopify-api/products.server";
+import { getVariantsInventory } from "../services/shopify-api/inventory.server";
 import { LocationPicker } from "../components/LocationPicker";
 import { MoneyField } from "../components/MoneyField";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
@@ -102,6 +103,41 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       return json({ hits });
     } catch (error) {
       return json({ hits: [] as SearchHit[], error: String(error) });
+    }
+  }
+
+  // "Show inventory count" — lazy-loaded per-location stock for every
+  // variant on the PO. Mirrors the loadStock intent on Print Labels /
+  // Transfers but returns the full per-location split rather than a
+  // single location's number.
+  if (intent === "loadInventory") {
+    const raw = JSON.parse(
+      String(formData.get("variantIds") ?? "[]"),
+    ) as string[];
+    const variantIds = [...new Set(raw)].filter(Boolean);
+    if (variantIds.length === 0) {
+      return json({ inventory: {} as Record<string, LineStock> });
+    }
+    try {
+      const map = await getVariantsInventory(admin, variantIds);
+      const inventory: Record<string, LineStock> = {};
+      for (const [vid, inv] of map.entries()) {
+        const levels = inv.levels.map((l) => ({
+          locationId: l.locationId,
+          locationName: l.locationName,
+          available: l.quantities.available ?? 0,
+        }));
+        inventory[vid] = {
+          total: levels.reduce((sum, l) => sum + l.available, 0),
+          levels,
+        };
+      }
+      return json({ inventory });
+    } catch (error) {
+      return json({
+        inventory: {} as Record<string, LineStock>,
+        inventoryError: String(error),
+      });
     }
   }
 
@@ -223,6 +259,109 @@ function ProductLink({
         >{` — ${nonSize}`}</span>
       )}
     </a>
+  );
+}
+
+// ── "Show inventory count" helpers ───────────────────────────────────
+// Per-variant stock snapshot returned by the loadInventory intent.
+export interface LineStock {
+  /** Sum of `available` across every location. */
+  total: number;
+  levels: Array<{
+    locationId: string;
+    locationName: string;
+    available: number;
+  }>;
+}
+
+// Short labels for the grid view, where size columns are ~70px wide and a
+// full location name won't fit. Known FL Woods stores get their usual
+// abbreviations (matches SRC/DEST labels on Replenishment); anything else
+// falls back to the first three letters.
+const LOCATION_SHORT_LABELS: Record<string, string> = {
+  marblehead: "MHD",
+  tiburon: "TB",
+};
+function shortLocationLabel(name: string): string {
+  const key = name.trim().toLowerCase();
+  for (const [needle, label] of Object.entries(LOCATION_SHORT_LABELS)) {
+    if (key.includes(needle)) return label;
+  }
+  return name.trim().slice(0, 3).toUpperCase();
+}
+
+// Order levels by the shop's location list so every row reads the same
+// way (Marblehead first, then Tiburon, …). Unknown locations sort last.
+function orderLevels(
+  levels: LineStock["levels"],
+  locations: Location[],
+): LineStock["levels"] {
+  const rank = new Map(locations.map((l, i) => [l.id, i]));
+  return [...levels].sort(
+    (a, b) =>
+      (rank.get(a.locationId) ?? 999) - (rank.get(b.locationId) ?? 999),
+  );
+}
+
+/**
+ * Small subdued line rendered under a SKU (line view) or under a qty cell
+ * (grid view, `compact`) showing available stock split by location.
+ */
+function StockSubtext({
+  stock,
+  locations,
+  loading,
+  compact = false,
+}: {
+  stock: LineStock | undefined;
+  locations: Location[];
+  loading: boolean;
+  compact?: boolean;
+}) {
+  const baseStyle: CSSProperties = {
+    fontSize: compact ? "10px" : "11px",
+    color: "#6b7280",
+    whiteSpace: "nowrap",
+    marginTop: "2px",
+    fontWeight: 400,
+    lineHeight: 1.3,
+  };
+  if (loading && !stock) {
+    return <div style={baseStyle}>Loading…</div>;
+  }
+  if (!stock) {
+    return <div style={baseStyle}>No inventory data</div>;
+  }
+  if (stock.levels.length === 0) {
+    return <div style={baseStyle}>Not stocked</div>;
+  }
+  const levels = orderLevels(stock.levels, locations);
+  const num = (n: number) => (
+    <span style={{ color: n < 0 ? "#d72c0d" : undefined, fontWeight: 500 }}>
+      {n}
+    </span>
+  );
+  if (compact) {
+    return (
+      <div style={baseStyle}>
+        {levels.map((l) => (
+          <div key={l.locationId}>
+            {shortLocationLabel(l.locationName)} {num(l.available)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div style={baseStyle}>
+      {levels.map((l, i) => (
+        <span key={l.locationId}>
+          {i > 0 && " · "}
+          {l.locationName}: {num(l.available)}
+        </span>
+      ))}
+      {levels.length > 1 && <span> · Total {num(stock.total)}</span>}
+    </div>
   );
 }
 
@@ -512,6 +651,38 @@ export default function PurchaseOrderDetail() {
     printedFetcher.submit(fd, { method: "post" });
   }, [printedFetcher, po.printedAt]);
 
+  // ── "Show inventory count" ───────────────────────────────────────────
+  // Toggled from More actions. Toggling on always re-fetches so the
+  // numbers are live; toggling off just hides the subtext (state survives
+  // an Edit → Cancel round trip because it's local to this component).
+  const inventoryFetcher = useFetcher<typeof action>();
+  const [showInventory, setShowInventory] = useState(false);
+  const isLoadingInventory = inventoryFetcher.state !== "idle";
+  // The action's return type is a wide union, so narrow structurally.
+  const inventoryData = inventoryFetcher.data as
+    | { inventory?: Record<string, LineStock>; inventoryError?: string }
+    | undefined;
+  const inventory: Record<string, LineStock> | null =
+    showInventory && inventoryData?.inventory ? inventoryData.inventory : null;
+  const inventoryError: string | null =
+    showInventory && inventoryData?.inventoryError
+      ? inventoryData.inventoryError
+      : null;
+  const handleToggleInventory = useCallback(() => {
+    if (showInventory) {
+      setShowInventory(false);
+      return;
+    }
+    setShowInventory(true);
+    const fd = new FormData();
+    fd.set("intent", "loadInventory");
+    fd.set(
+      "variantIds",
+      JSON.stringify(po.lineItems.map((li) => li.shopifyVariantId)),
+    );
+    inventoryFetcher.submit(fd, { method: "post" });
+  }, [showInventory, po.lineItems, inventoryFetcher]);
+
   // ── PDF / label downloads ────────────────────────────────────────────
   // All PDF downloads fetch inside the authenticated iframe and trigger a
   // blob download. A top-level navigation to the API endpoint (what we used
@@ -667,7 +838,18 @@ export default function PurchaseOrderDetail() {
       />
     ),
     li.variantTitle,
-    li.sku || "—",
+    showInventory ? (
+      <div key={`sku-${li.id}`}>
+        {li.sku || "—"}
+        <StockSubtext
+          stock={inventory?.[li.shopifyVariantId]}
+          locations={locations}
+          loading={isLoadingInventory}
+        />
+      </div>
+    ) : (
+      li.sku || "—"
+    ),
     li.barcode || "—",
     `$${li.unitCost.toFixed(2)}`,
     `$${(li.retailPrice || 0).toFixed(2)}`,
@@ -778,6 +960,16 @@ export default function PurchaseOrderDetail() {
           ? [{ content: "Cancel", onAction: handleCancelEdit }]
           : [
               ...extraSecondaryActions,
+              {
+                content: isLoadingInventory
+                  ? "Loading inventory…"
+                  : showInventory
+                    ? "Hide inventory count"
+                    : "Show inventory count",
+                onAction: handleToggleInventory,
+                loading: isLoadingInventory,
+                disabled: isLoadingInventory,
+              },
               {
                 content:
                   isGenerating === "labels" ? "Generating…" : "Print Labels",
@@ -1210,6 +1402,18 @@ export default function PurchaseOrderDetail() {
           </Layout.Section>
         )}
 
+        {inventoryError && (
+          <Layout.Section>
+            <Banner
+              tone="critical"
+              title="Couldn't load inventory"
+              onDismiss={() => setShowInventory(false)}
+            >
+              <p>{inventoryError}</p>
+            </Banner>
+          </Layout.Section>
+        )}
+
         {/* Line items — editable on drafts when editing, otherwise DataTable */}
         <Layout.Section>
           {isEditing && canEditLines ? (
@@ -1239,6 +1443,10 @@ export default function PurchaseOrderDetail() {
                 {editViewMode === "grid" ? (
                   <PODetailGrid
                     lineItems={editLines}
+                    inventory={inventory}
+                    inventoryLoading={showInventory && isLoadingInventory}
+                    showInventory={showInventory}
+                    locations={locations}
                     editable
                     onCellQtyChange={(lineItemId, qty) =>
                       setEditLines((prev) =>
@@ -1536,7 +1744,13 @@ export default function PurchaseOrderDetail() {
                     />
                   </div>
                 ) : (
-                  <PODetailGrid lineItems={po.lineItems} />
+                  <PODetailGrid
+                    lineItems={po.lineItems}
+                    inventory={inventory}
+                    inventoryLoading={showInventory && isLoadingInventory}
+                    showInventory={showInventory}
+                    locations={locations}
+                  />
                 )}
               </BlockStack>
             </Card>
@@ -1630,16 +1844,22 @@ interface PODetailLine {
   quantityOrdered: number;
   quantityReceived: number;
   shopifyProductId: string;
+  shopifyVariantId: string;
 }
 
 interface PODetailCell {
   lineItemId: string;
+  variantId: string;
   ordered: number;
   received: number;
 }
 
 function PODetailGrid({
   lineItems,
+  inventory = null,
+  inventoryLoading = false,
+  showInventory = false,
+  locations = [],
   editable = false,
   onCellQtyChange,
   onRowCostChange,
@@ -1647,6 +1867,11 @@ function PODetailGrid({
   onRemoveLine,
 }: {
   lineItems: PODetailLine[];
+  /** Per-variant stock from the loadInventory intent (null = not shown). */
+  inventory?: Record<string, LineStock> | null;
+  inventoryLoading?: boolean;
+  showInventory?: boolean;
+  locations?: Location[];
   editable?: boolean;
   onCellQtyChange?: (lineItemId: string, qty: number) => void;
   onRowCostChange?: (lineItemIds: string[], cost: number) => void;
@@ -1690,6 +1915,7 @@ function PODetailGrid({
     group.lineItemIds.push(li.id);
     const cell: PODetailCell = {
       lineItemId: li.id,
+      variantId: li.shopifyVariantId,
       ordered: li.quantityOrdered,
       received: li.quantityReceived,
     };
@@ -1704,6 +1930,19 @@ function PODetailGrid({
   const sortedSizes = [...sizeSet].sort(compareSizesForDetail);
   const sizeColCount = Math.max(sortedSizes.length, 1);
 
+  // Per-cell stock subtext for "Show inventory count". Rendered under the
+  // ordered qty in every cell branch (read-only + editable) so the toggle
+  // stays meaningful if the user enters edit mode.
+  const cellStock = (cell: PODetailCell) =>
+    showInventory ? (
+      <StockSubtext
+        compact
+        stock={inventory?.[cell.variantId]}
+        locations={locations}
+        loading={inventoryLoading}
+      />
+    ) : null;
+
   if (groups.size === 0) {
     return (
       <Text as="p" tone="subdued">
@@ -1714,6 +1953,21 @@ function PODetailGrid({
 
   return (
     <div style={{ overflowX: "auto" }}>
+      {showInventory && (
+        <div
+          style={{
+            fontSize: "11px",
+            color: "#6b7280",
+            marginBottom: "4px",
+          }}
+        >
+          Stock shown under each qty = available per location (
+          {locations
+            .map((l) => `${shortLocationLabel(l.name)} ${l.name}`)
+            .join(" · ")}
+          )
+        </div>
+      )}
       <table
         style={{
           width: "100%",
@@ -1875,6 +2129,7 @@ function PODetailGrid({
                                 {cell.received} received
                               </div>
                             )}
+                            {cellStock(cell)}
                           </div>
                         );
                       }
@@ -1891,6 +2146,7 @@ function PODetailGrid({
                               ({cell.received} received)
                             </Text>
                           )}
+                          {cellStock(cell)}
                         </>
                       );
                     })()}
@@ -1952,6 +2208,9 @@ function PODetailGrid({
                               {cell.received} received
                             </div>
                           )}
+                          <div style={{ textAlign: "center" }}>
+                            {cellStock(cell)}
+                          </div>
                         </td>
                       );
                     }
@@ -1978,6 +2237,7 @@ function PODetailGrid({
                             {cell.received} received
                           </div>
                         )}
+                        {cellStock(cell)}
                       </td>
                     );
                   })
