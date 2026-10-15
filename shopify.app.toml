@@ -1,6 +1,6 @@
 # This file stores configurations for your Shopify app.
 
-name = "FLW Management"
+name = "FLW OMS"
 client_id = "2fad5c157c0d7b8d53bbf370b07330f5"
 application_url = "https://flw-oms.fly.dev"
 embedded = true

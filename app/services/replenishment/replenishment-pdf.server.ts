@@ -31,6 +31,11 @@ export interface ReplenishmentPdfOptions {
   srcLabel: string;
   startDate: string;
   endDate: string;
+  /**
+   * Source and destination are the same store: a back-room restock
+   * list rather than a transfer, so one stock number per cell.
+   */
+  sameLocation?: boolean;
 }
 
 const SIZE_ORDER = [
@@ -80,7 +85,8 @@ function formatDateSafe(d: string): string {
 export async function generateReplenishmentPdf(
   options: ReplenishmentPdfOptions,
 ): Promise<Buffer> {
-  const { rows, destinationName, sourceName, destLabel, srcLabel } = options;
+  const { rows, destinationName, sourceName, destLabel, srcLabel, sameLocation } =
+    options;
 
   const doc = new jsPDF({
     unit: "in",
@@ -98,7 +104,7 @@ export async function generateReplenishmentPdf(
   let y = margin;
   doc.setFont("helvetica", "bold");
   doc.setFontSize(16);
-  doc.text("Replenishment", margin, y + 0.2);
+  doc.text(sameLocation ? "Restock list" : "Replenishment", margin, y + 0.2);
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
   doc.text(FLW_COMPANY_INFO.name, pageWidth - margin, y + 0.2, {
@@ -108,7 +114,9 @@ export async function generateReplenishmentPdf(
 
   doc.setFontSize(10);
   doc.text(
-    `From ${sourceName} (${srcLabel})  to  ${destinationName} (${destLabel})`,
+    sameLocation
+      ? `${destinationName} — restock from back room`
+      : `From ${sourceName} (${srcLabel})  to  ${destinationName} (${destLabel})`,
     margin,
     y,
   );
@@ -232,7 +240,9 @@ export async function generateReplenishmentPdf(
         doc.setTextColor(90);
         doc.text(`Sold ${cell.sold}`, cx, y + 0.2, { align: "center" });
         doc.text(
-          `${destLabel} ${cell.destinationAvailable} · ${srcLabel} ${cell.sourceAvailable}`,
+          sameLocation
+            ? `On hand ${cell.destinationAvailable}`
+            : `${destLabel} ${cell.destinationAvailable} · ${srcLabel} ${cell.sourceAvailable}`,
           cx,
           y + 0.29,
           { align: "center" },

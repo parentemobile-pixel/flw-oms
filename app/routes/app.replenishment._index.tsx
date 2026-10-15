@@ -131,9 +131,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!sourceLocationGid || !destLocationGid) {
     return json({ error: "Pick both a source and destination location." });
   }
-  if (sourceLocationGid === destLocationGid) {
-    return json({ error: "Source and destination must be different." });
-  }
+  // Source == destination is allowed: it's a back-room restock list
+  // (what sold, and the store's own on-hand), with no transfer.
   if (!startDate || !endDate) {
     return json({ error: "Pick a date range." });
   }
@@ -294,38 +293,32 @@ function classifyRow(
   return { kind: "restockable" };
 }
 
-function NoteBadge({ note }: { note: RowNote }) {
-  switch (note.kind) {
-    case "restockable":
-      return <Badge tone="success">Restockable</Badge>;
-    case "lastUnit":
-      return (
-        <Badge tone="attention">
-          {`Last unit at source · ${note.sizes.join(", ")}`}
-        </Badge>
-      );
-    case "partialOOS":
-      return (
-        <Badge tone="warning">
-          {`Partial · ${note.sizes.join(", ")} OOS`}
-        </Badge>
-      );
-    case "oos":
-      return <Badge tone="critical">OOS at source</Badge>;
-  }
+const NOTE_TONES = {
+  restockable: "success",
+  lastUnit: "attention",
+  partialOOS: "warning",
+  oos: "critical",
+} as const;
+
+function NoteBadge({ note, sameLocation }: { note: RowNote; sameLocation: boolean }) {
+  return <Badge tone={NOTE_TONES[note.kind]}>{noteLabel(note, sameLocation)}</Badge>;
 }
 
-/** Plain-text version of the note badge — used by the PDF. */
-function noteLabel(note: RowNote): string {
+/**
+ * Note text — badge and PDF. Same-location (back-room restock) runs drop
+ * the "at source" wording since there is only one store.
+ */
+function noteLabel(note: RowNote, sameLocation = false): string {
+  const at = sameLocation ? "" : " at source";
   switch (note.kind) {
     case "restockable":
       return "Restockable";
     case "lastUnit":
-      return `Last unit at source · ${note.sizes.join(", ")}`;
+      return `Last unit${at} · ${note.sizes.join(", ")}`;
     case "partialOOS":
       return `Partial · ${note.sizes.join(", ")} OOS`;
     case "oos":
-      return "OOS at source";
+      return `OOS${at}`;
   }
 }
 
@@ -415,6 +408,12 @@ export default function Replenishment() {
     [rawReportRows, removedVariantIds],
   );
   const reportSummary = actionData?.report?.summary;
+  // The report in view was run with source == destination — a back-room
+  // restock list. Keyed off the run, not the pickers, so changing a
+  // picker doesn't relabel a report that's already on screen.
+  const sameLocation =
+    !!actionData?.report &&
+    actionData.sourceLocationGid === actionData.destLocationGid;
 
   // Build the (productId::nonSize::SIZE) → variantId map for un-promoted
   // peer variants so ProductGrid can render clickable "+" cells.
@@ -521,12 +520,18 @@ export default function Replenishment() {
         <>
           Sold {row.sold}
           <br />
-          {DEST_LABEL} {row.destinationAvailable} · {SRC_LABEL}{" "}
-          {row.sourceAvailable}
+          {sameLocation ? (
+            <>On hand {row.destinationAvailable}</>
+          ) : (
+            <>
+              {DEST_LABEL} {row.destinationAvailable} · {SRC_LABEL}{" "}
+              {row.sourceAvailable}
+            </>
+          )}
         </>
       );
     },
-    [rowByVariantId],
+    [rowByVariantId, sameLocation],
   );
 
   // Same readout for the un-promoted "+" cells (sizes that didn't
@@ -540,6 +545,7 @@ export default function Replenishment() {
     (variantId: string) => {
       const peer = peerByVariantId.get(variantId);
       if (!peer) return null;
+      if (sameLocation) return <>On hand {peer.destinationAvailable}</>;
       return (
         <>
           {DEST_LABEL} {peer.destinationAvailable} · {SRC_LABEL}{" "}
@@ -547,7 +553,7 @@ export default function Replenishment() {
         </>
       );
     },
-    [peerByVariantId],
+    [peerByVariantId, sameLocation],
   );
 
   // Color cells by urgency: red = source has 0 (can't ship), amber =
@@ -605,6 +611,8 @@ export default function Replenishment() {
         // rows. min-width keeps it readable on narrow screens.
         <div style={{ minWidth: "160px" }}>
         <BlockStack gap="100" align="end">
+          {/* No transfer in a same-location run, so no box split. */}
+          {!sameLocation && (
           <div style={{ width: "90px" }}>
             <TextField
               label="Box"
@@ -620,12 +628,13 @@ export default function Replenishment() {
               prefix="Box"
             />
           </div>
-          <NoteBadge note={note} />
+          )}
+          <NoteBadge note={note} sameLocation={sameLocation} />
         </BlockStack>
         </div>
       );
     },
-    [rowByVariantId, rowKeyFor, boxByRowKey],
+    [rowByVariantId, rowKeyFor, boxByRowKey, sameLocation],
   );
 
   const handleRunReport = useCallback(() => {
@@ -758,16 +767,18 @@ export default function Replenishment() {
   };
   const handleExportCsv = useCallback(() => {
     if (reportRows.length === 0) return;
-    const header = [
-      "Product",
-      "Colorway",
-      "Size",
-      "SKU",
-      "Sold",
-      `${DEST_LABEL} available`,
-      `${SRC_LABEL} available`,
-      "Proposed transfer qty",
-    ];
+    const header = sameLocation
+      ? ["Product", "Colorway", "Size", "SKU", "Sold", "On hand", "Proposed restock qty"]
+      : [
+          "Product",
+          "Colorway",
+          "Size",
+          "SKU",
+          "Sold",
+          `${DEST_LABEL} available`,
+          `${SRC_LABEL} available`,
+          "Proposed transfer qty",
+        ];
     const rows = reportRows.map((r) => {
       const sizeOpt = r.selectedOptions.find(
         (o) => o.name.toLowerCase() === "size",
@@ -783,7 +794,7 @@ export default function Replenishment() {
         r.sku ?? "",
         r.sold,
         r.destinationAvailable,
-        r.sourceAvailable,
+        ...(sameLocation ? [] : [r.sourceAvailable]),
         transferQty[r.variantId] ?? 0,
       ];
     });
@@ -801,7 +812,7 @@ export default function Replenishment() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [reportRows, transferQty, startDate, endDate]);
+  }, [reportRows, transferQty, startDate, endDate, sameLocation]);
   // Print PDF — server-rendered snapshot of the grid as it stands
   // (every row, current transfer quantities, notes). Opens in a new
   // tab and auto-triggers the print dialog; mirrors the Print Labels
@@ -835,7 +846,7 @@ export default function Replenishment() {
           available: r.sourceAvailable,
         })),
       );
-      noteByRowKey.set(key, noteLabel(note));
+      noteByRowKey.set(key, noteLabel(note, sameLocation));
     }
     const pdfRows = reportRows.map((r) => {
       const sizeOpt = r.selectedOptions.find(
@@ -879,6 +890,7 @@ export default function Replenishment() {
     );
     fd.set("destLabel", DEST_LABEL);
     fd.set("srcLabel", SRC_LABEL);
+    if (sameLocation) fd.set("sameLocation", "1");
 
     setIsGeneratingPdf(true);
     try {
@@ -938,12 +950,17 @@ export default function Replenishment() {
     locations,
     destLocationId,
     sourceLocationId,
+    sameLocation,
   ]);
 
   return (
     <Page
       title="Replenishment"
-      subtitle="What sold at the destination, what's available at the source, and what to transfer."
+      subtitle={
+        sameLocation
+          ? `What sold at ${locations.find((l) => l.id === actionData?.destLocationGid)?.name ?? "this store"} — restock from the back room.`
+          : "What sold at the destination, what's available at the source, and what to transfer. Pick the same store for both to get a back-room restock list."
+      }
     >
       <Layout>
         {pdfError && (
@@ -1008,9 +1025,7 @@ export default function Replenishment() {
                 <div style={{ flex: 1, minWidth: "220px" }}>
                   <LocationPicker
                     label="Destination (sells / receives)"
-                    locations={locations.filter(
-                      (l) => l.id !== sourceLocationId,
-                    )}
+                    locations={locations}
                     value={destLocationId}
                     onChange={setDestLocationId}
                     persistKey="replenishment-dest"
@@ -1049,11 +1064,7 @@ export default function Replenishment() {
                   variant="primary"
                   loading={isBusy}
                   onClick={handleRunReport}
-                  disabled={
-                    !sourceLocationId ||
-                    !destLocationId ||
-                    sourceLocationId === destLocationId
-                  }
+                  disabled={!sourceLocationId || !destLocationId}
                 >
                   Run report
                 </Button>
@@ -1093,7 +1104,7 @@ export default function Replenishment() {
                 </BlockStack>
                 <BlockStack gap="050">
                   <Text as="p" variant="bodySm" tone="subdued">
-                    Short or OOS at source
+                    {sameLocation ? "Short or OOS" : "Short or OOS at source"}
                   </Text>
                   <Text
                     as="p"
@@ -1107,7 +1118,7 @@ export default function Replenishment() {
                 </BlockStack>
                 <BlockStack gap="050">
                   <Text as="p" variant="bodySm" tone="subdued">
-                    Proposed to transfer
+                    {sameLocation ? "Proposed to restock" : "Proposed to transfer"}
                   </Text>
                   <Text as="p" variant="headingLg">
                     {totalProposed}
@@ -1125,7 +1136,7 @@ export default function Replenishment() {
               <div style={{ padding: "16px" }}>
                 <ProductGrid
                   cells={cells}
-                  qtyLabel="Transfer"
+                  qtyLabel={sameLocation ? "Restock" : "Transfer"}
                   onCellChange={handleCellChange}
                   showColumns={{
                     cost: false,
@@ -1189,7 +1200,7 @@ export default function Replenishment() {
         {reportRows.length > 0 && (
           <Layout.Section>
             <InlineStack align="end" gap="200" blockAlign="end" wrap>
-              {(() => {
+              {!sameLocation && (() => {
                 const distinctBoxes = new Set(
                   reportRows
                     .filter((r) => (transferQty[r.variantId] ?? 0) > 0)
@@ -1219,6 +1230,7 @@ export default function Replenishment() {
                 Print PDF
               </Button>
               <Button onClick={handleExportCsv}>Export CSV</Button>
+              {!sameLocation && (
               <Button
                 variant="primary"
                 onClick={handleCreateTransfer}
@@ -1243,6 +1255,7 @@ export default function Replenishment() {
                     : `Create transfer (${totalProposed} units)`;
                 })()}
               </Button>
+              )}
             </InlineStack>
           </Layout.Section>
         )}

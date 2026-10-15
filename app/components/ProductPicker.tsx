@@ -16,6 +16,8 @@ export interface PickerVariant {
   id: string;
   title: string;
   sku: string | null;
+  /** Current barcode, when the caller's search returns it. */
+  barcode?: string | null;
   selectedOptions: Array<{ name: string; value: string }>;
   /** Optional stock badge shown next to the variant. */
   inStock?: number | null;

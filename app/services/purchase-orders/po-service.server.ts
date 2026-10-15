@@ -47,6 +47,8 @@ export interface UpdatePOInput {
 export interface POSummary {
   id: string;
   poNumber: string;
+  /** Vendor's own PO / reference number. */
+  poNumberExt: string | null;
   name: string | null;
   vendor: string | null;
   status: string;
@@ -168,6 +170,7 @@ export async function getPurchaseOrderSummaries(
     select: {
       id: true,
       poNumber: true,
+      poNumberExt: true,
       name: true,
       vendor: true,
       status: true,

@@ -4,7 +4,12 @@ import type {
   LoaderFunctionArgs,
 } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { useFetcher, useLoaderData, Link } from "@remix-run/react";
+import {
+  useFetcher,
+  useLoaderData,
+  useSearchParams,
+  Link,
+} from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -15,6 +20,10 @@ import {
   EmptyState,
   Checkbox,
   BlockStack,
+  InlineStack,
+  Select,
+  TextField,
+  Button,
 } from "@shopify/polaris";
 
 import { authenticate } from "../shopify.server";
@@ -24,12 +33,26 @@ import {
   setPurchaseOrderPrinted,
   type POSummary,
 } from "../services/purchase-orders/po-service.server";
-import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
+import { getLocations } from "../services/shopify-api/locations.server";
+import {
+  PO_STATUSES,
+  PO_STATUS_LABELS,
+  PO_STATUS_TONES,
+} from "../utils/constants";
+import { shortLocationLabel } from "../utils/locations";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
-  const purchaseOrders = await getPurchaseOrderSummaries(session.shop);
-  return json({ purchaseOrders });
+  const { admin, session } = await authenticate.admin(request);
+  const [purchaseOrders, locations] = await Promise.all([
+    getPurchaseOrderSummaries(session.shop),
+    getLocations(admin, session.shop).catch(() => []),
+  ]);
+  // Only id → short label ("TB", "MHD") is needed for the Store column
+  // and filter.
+  return json({
+    purchaseOrders,
+    stores: locations.map((l) => ({ id: l.id, label: shortLocationLabel(l.name) })),
+  });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -67,34 +90,39 @@ function formatDate(date: Date | string | null | undefined): string {
 
 // Column-index → comparator. Mirror the headings array order — adding or
 // reordering columns here means updating the headings list below to match.
-const SORT_COMPARATORS: Array<(a: POSummary, b: POSummary) => number> = [
+// `null` = not sortable (the Store column — there are only two stores,
+// and the Store filter covers it).
+const SORT_COMPARATORS: Array<((a: POSummary, b: POSummary) => number) | null> = [
   // 0: PO (name preferred, fall back to poNumber)
   (a, b) => (a.name || a.poNumber).localeCompare(b.name || b.poNumber),
   // 1: Vendor
   (a, b) => (a.vendor || "").localeCompare(b.vendor || ""),
-  // 2: Status
+  // 2: Store
+  null,
+  // 3: Status
   (a, b) => a.status.localeCompare(b.status),
-  // 3: Paid (paid first when ascending)
+  // 4: Paid (paid first when ascending)
   (a, b) => Number(!!b.paidAt) - Number(!!a.paidAt),
-  // 4: Printed (printed first when ascending)
+  // 5: Printed (printed first when ascending)
   (a, b) => Number(!!b.printedAt) - Number(!!a.printedAt),
-  // 5: Units
+  // 6: Units
   (a, b) => a.totalUnits - b.totalUnits,
-  // 6: Received (% so a 50/100 PO sorts above 5/5 — partial fulfillment urgency)
+  // 7: Received (% so a 50/100 PO sorts above 5/5 — partial fulfillment urgency)
   (a, b) => {
     const pa = a.totalUnits > 0 ? a.totalReceived / a.totalUnits : 0;
     const pb = b.totalUnits > 0 ? b.totalReceived / b.totalUnits : 0;
     return pa - pb;
   },
-  // 7: Total Cost
+  // 8: Total Cost
   (a, b) => a.totalCost - b.totalCost,
-  // 8: Ship By (nulls last when ascending)
+  // 9: Ship By (nulls last when ascending)
   (a, b) => dateAsc(a.shippingDate, b.shippingDate),
-  // 9: Expected
+  // 10: Expected
   (a, b) => dateAsc(a.expectedDate, b.expectedDate),
-  // 10: Created
+  // 11: Created
   (a, b) => dateAsc(a.createdAt, b.createdAt),
 ];
+const CREATED_COLUMN = 11;
 
 function dateAsc(
   a: Date | string | null | undefined,
@@ -108,24 +136,86 @@ function dateAsc(
 }
 
 export default function PurchaseOrdersList() {
-  const { purchaseOrders } = useLoaderData<typeof loader>();
+  const { purchaseOrders, stores } = useLoaderData<typeof loader>();
   const paidFetcher = useFetcher<typeof action>();
   const printedFetcher = useFetcher<typeof action>();
   // Default sort: created date descending (matches the previous behavior
-  // when summaries came back orderBy createdAt desc). Created is column
-  // index 10 after the Printed checkbox column was inserted at index 4.
-  const [sortIndex, setSortIndex] = useState<number>(10);
+  // when summaries came back orderBy createdAt desc).
+  const [sortIndex, setSortIndex] = useState<number>(CREATED_COLUMN);
   const [sortDir, setSortDir] = useState<"ascending" | "descending">(
     "descending",
   );
 
+  // Filters live in the URL so a filtered view survives reloads and
+  // back-navigation from a PO. Store matches on short label so "TB"
+  // covers every location that abbreviates to TB.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const storeFilter = searchParams.get("store") ?? "";
+  const statusFilter = searchParams.get("status") ?? "";
+  const vendorFilter = searchParams.get("vendor") ?? "";
+  const appliedSearch = searchParams.get("q") ?? "";
+  const [searchDraft, setSearchDraft] = useState(appliedSearch);
+  const setParam = useCallback(
+    (key: string, value: string) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (value) next.set(key, value);
+          else next.delete(key);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const storeLabelById = useMemo(
+    () => new Map(stores.map((s) => [s.id, s.label])),
+    [stores],
+  );
+  const storeOptions = useMemo(
+    () => [...new Set(stores.map((s) => s.label))].sort(),
+    [stores],
+  );
+  const vendorOptions = useMemo(
+    () =>
+      [...new Set(purchaseOrders.map((po) => po.vendor).filter(Boolean) as string[])].sort(
+        (a, b) => a.localeCompare(b),
+      ),
+    [purchaseOrders],
+  );
+
+  const filteredPOs = useMemo(() => {
+    const q = appliedSearch.trim().toLowerCase();
+    return purchaseOrders.filter((po) => {
+      if (storeFilter) {
+        const label = po.shopifyLocationId
+          ? storeLabelById.get(po.shopifyLocationId)
+          : undefined;
+        if (label !== storeFilter) return false;
+      }
+      if (statusFilter && po.status !== statusFilter) return false;
+      if (vendorFilter && po.vendor !== vendorFilter) return false;
+      if (q) {
+        const haystack = [po.name, po.poNumber, po.poNumberExt, po.vendor]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [purchaseOrders, storeFilter, statusFilter, vendorFilter, appliedSearch, storeLabelById]);
+  const hasFilters = !!(storeFilter || statusFilter || vendorFilter || appliedSearch);
+
   const sortedPOs = useMemo(() => {
     const cmp = SORT_COMPARATORS[sortIndex];
-    if (!cmp) return purchaseOrders;
-    const out = [...purchaseOrders].sort(cmp);
+    if (!cmp) return filteredPOs;
+    const out = [...filteredPOs].sort(cmp);
     if (sortDir === "descending") out.reverse();
     return out;
-  }, [purchaseOrders, sortIndex, sortDir]);
+  }, [filteredPOs, sortIndex, sortDir]);
 
   const handleSort = useCallback(
     (index: number, direction: "ascending" | "descending") => {
@@ -195,6 +285,9 @@ export default function PurchaseOrdersList() {
       </IndexTable.Cell>
       <IndexTable.Cell>{po.vendor || "—"}</IndexTable.Cell>
       <IndexTable.Cell>
+        {(po.shopifyLocationId && storeLabelById.get(po.shopifyLocationId)) || "—"}
+      </IndexTable.Cell>
+      <IndexTable.Cell>
         <Badge tone={PO_STATUS_TONES[po.status] || "info"}>
           {PO_STATUS_LABELS[po.status] || po.status}
         </Badge>
@@ -248,6 +341,81 @@ export default function PurchaseOrdersList() {
       ]}
     >
       <Layout>
+        {purchaseOrders.length > 0 && (
+          <Layout.Section>
+            <Card>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setParam("q", searchDraft.trim());
+                }}
+              >
+                <InlineStack gap="300" wrap blockAlign="center">
+                  <div style={{ flex: 1, minWidth: "260px" }}>
+                    <TextField
+                      label="Search"
+                      labelHidden
+                      value={searchDraft}
+                      onChange={setSearchDraft}
+                      placeholder="Search PO #, name, vendor…"
+                      autoComplete="off"
+                      clearButton
+                      onClearButtonClick={() => {
+                        setSearchDraft("");
+                        setParam("q", "");
+                      }}
+                    />
+                  </div>
+                  <Button submit>Search</Button>
+                  <Select
+                    label="Store"
+                    labelInline
+                    options={[
+                      { label: "Both", value: "" },
+                      ...storeOptions.map((l) => ({ label: l, value: l })),
+                    ]}
+                    value={storeFilter}
+                    onChange={(v) => setParam("store", v)}
+                  />
+                  <Select
+                    label="Status"
+                    labelInline
+                    options={[
+                      { label: "All", value: "" },
+                      ...Object.values(PO_STATUSES).map((st) => ({
+                        label: PO_STATUS_LABELS[st] ?? st,
+                        value: st,
+                      })),
+                    ]}
+                    value={statusFilter}
+                    onChange={(v) => setParam("status", v)}
+                  />
+                  <Select
+                    label="Vendor"
+                    labelInline
+                    options={[
+                      { label: "All vendors", value: "" },
+                      ...vendorOptions.map((v) => ({ label: v, value: v })),
+                    ]}
+                    value={vendorFilter}
+                    onChange={(v) => setParam("vendor", v)}
+                  />
+                  {hasFilters && (
+                    <Button
+                      variant="plain"
+                      onClick={() => {
+                        setSearchDraft("");
+                        setSearchParams(new URLSearchParams(), { replace: true });
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  )}
+                </InlineStack>
+              </form>
+            </Card>
+          </Layout.Section>
+        )}
         <Layout.Section>
           <Card padding="0">
             {purchaseOrders.length === 0 ? (
@@ -255,12 +423,13 @@ export default function PurchaseOrdersList() {
             ) : (
               <IndexTable
                 resourceName={resourceName}
-                itemCount={purchaseOrders.length}
+                itemCount={sortedPOs.length}
                 // Sortable columns — every column index here has a matching
                 // comparator in SORT_COMPARATORS. Click a header to sort.
                 sortable={[
                   true, // PO
                   true, // Vendor
+                  false, // Store
                   true, // Status
                   true, // Paid
                   true, // Printed
@@ -277,6 +446,7 @@ export default function PurchaseOrdersList() {
                 headings={[
                   { title: "PO" },
                   { title: "Vendor" },
+                  { title: "Store" },
                   { title: "Status" },
                   { title: "Paid" },
                   { title: "Printed" },

@@ -9,7 +9,9 @@ import {
   Text,
   Button,
   InlineStack,
+  InlineGrid,
 } from "@shopify/polaris";
+import type { ReactNode } from "react";
 
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -59,120 +61,106 @@ const SECONDARY_LINKS: Array<{ label: string; url: string; hint: string }> = [
   { label: "Products", url: "/app/products", hint: "Bulk vendor, cost, tag, archive" },
 ];
 
+// Equal-height home tile. Polaris Card has no height prop, so the
+// wrapper forces Card's own elements to fill the grid cell, and the
+// buttons are pushed to the bottom so they line up across a row.
+function Tile({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flw-home-tile">
+      <Card>
+        <div className="flw-home-tile__body">
+          <BlockStack gap="300">
+            <Text as="h2" variant="headingMd">
+              {title}
+            </Text>
+            <Text as="p" variant="bodySm" tone="subdued">
+              {description}
+            </Text>
+          </BlockStack>
+          {/* InlineStack keeps buttons auto-sized instead of stretching */}
+          <InlineStack gap="200">{children}</InlineStack>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+const TILE_CSS = `
+.flw-home-tile, .flw-home-tile > div, .flw-home-tile > div > div { height: 100%; }
+.flw-home-tile__body { display: flex; flex-direction: column; justify-content: space-between; gap: var(--p-space-300); height: 100%; }
+`;
+
 export default function Index() {
   const { pos, transfers } = useLoaderData<typeof loader>();
 
   return (
     <Page
-      title="FL Woods – OMS"
+      title="FLW OMS"
       subtitle="Order management for the FL Woods team"
     >
+      <style>{TILE_CSS}</style>
       <Layout>
-        {/* Five primary tiles */}
-        <Layout.Section variant="oneHalf">
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">
-                Purchase Orders
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                {pos.draft ?? 0} draft · {pos.ordered ?? 0} ordered ·{" "}
-                {pos.partially_received ?? 0} partial ·{" "}
-                {pos.received ?? 0} received
-              </Text>
-              <InlineStack gap="200">
-                <Button url="/app/purchase-orders">View all</Button>
-                <Button url="/app/purchase-orders/new" variant="primary">
-                  New PO
-                </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+        {/* Five primary tiles — one grid so every tile shares the same
+            width and each row's tiles stretch to the same height (the
+            old oneHalf sections sized to content and let the odd fifth
+            tile stretch full-width). */}
+        <Layout.Section>
+          <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
+            <Tile
+              title="Purchase Orders"
+              description={`${pos.draft ?? 0} draft · ${pos.ordered ?? 0} ordered · ${pos.partially_received ?? 0} partial · ${pos.received ?? 0} received`}
+            >
+              <Button url="/app/purchase-orders">View all</Button>
+              <Button url="/app/purchase-orders/new" variant="primary">
+                New PO
+              </Button>
+            </Tile>
 
-        <Layout.Section variant="oneHalf">
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">
-                Transfers
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                {transfers.draft ?? 0} draft ·{" "}
-                {transfers.in_transit ?? 0} in transit ·{" "}
-                {transfers.received ?? 0} received
-              </Text>
-              <InlineStack gap="200">
-                <Button url="/app/transfers">View all</Button>
-                <Button url="/app/transfers/new" variant="primary">
-                  New transfer
-                </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+            <Tile
+              title="Transfers"
+              description={`${transfers.draft ?? 0} draft · ${transfers.in_transit ?? 0} in transit · ${transfers.received ?? 0} received`}
+            >
+              <Button url="/app/transfers">View all</Button>
+              <Button url="/app/transfers/new" variant="primary">
+                New transfer
+              </Button>
+            </Tile>
 
-        {/* Print Labels — simple tile button (matches PO / Transfers
-            style). Full search-and-print flow lives on the dedicated
-            /app/print-labels page. Placed in Replenishment's former
-            slot so it sits higher in the daily-driver order.
-            Buttons wrapped in InlineStack so they auto-size instead of
-            stretching to the card width (BlockStack's default
-            inlineAlign="stretch" is what does the stretching). */}
-        <Layout.Section variant="oneHalf">
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">
-                Print Labels
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                Search a product, pick a variant, print barcode labels
-                to the Zebra.
-              </Text>
-              <InlineStack gap="200">
-                <Button url="/app/print-labels" variant="primary">
-                  Print labels
-                </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+            <Tile
+              title="Print Labels"
+              description="Search a product, pick a variant, print barcode labels to the Zebra."
+            >
+              <Button url="/app/print-labels" variant="primary">
+                Print labels
+              </Button>
+            </Tile>
 
-        <Layout.Section variant="oneHalf">
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">
-                Product Builder
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                New product with size/color variants, barcodes, tagging
-                taxonomy — one flow.
-              </Text>
-              <InlineStack gap="200">
-                <Button url="/app/product-builder" variant="primary">
-                  Create product
-                </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
-        </Layout.Section>
+            <Tile
+              title="Product Builder"
+              description="New product with size/color variants, barcodes, tagging taxonomy — one flow."
+            >
+              <Button url="/app/product-builder" variant="primary">
+                Create product
+              </Button>
+            </Tile>
 
-        <Layout.Section variant="oneHalf">
-          <Card>
-            <BlockStack gap="300">
-              <Text as="h2" variant="headingMd">
-                Replenishment
-              </Text>
-              <Text as="p" variant="bodySm" tone="subdued">
-                What sold at one store, what's available at the other, and
-                what to transfer.
-              </Text>
-              <InlineStack gap="200">
-                <Button url="/app/replenishment" variant="primary">
-                  Run replenishment
-                </Button>
-              </InlineStack>
-            </BlockStack>
-          </Card>
+            <Tile
+              title="Replenishment"
+              description="What sold at one store, what's available at the other, and what to transfer."
+            >
+              <Button url="/app/replenishment" variant="primary">
+                Run replenishment
+              </Button>
+            </Tile>
+          </InlineGrid>
         </Layout.Section>
 
         {/* Secondary tools — everything else, compact list */}

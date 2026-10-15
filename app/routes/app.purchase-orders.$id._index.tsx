@@ -53,6 +53,7 @@ import { getVariantsInventory } from "../services/shopify-api/inventory.server";
 import { LocationPicker } from "../components/LocationPicker";
 import { MoneyField } from "../components/MoneyField";
 import { PO_STATUS_LABELS, PO_STATUS_TONES } from "../utils/constants";
+import { shortLocationLabel } from "../utils/locations";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -272,22 +273,6 @@ export interface LineStock {
     locationName: string;
     available: number;
   }>;
-}
-
-// Short labels for the grid view, where size columns are ~70px wide and a
-// full location name won't fit. Known FL Woods stores get their usual
-// abbreviations (matches SRC/DEST labels on Replenishment); anything else
-// falls back to the first three letters.
-const LOCATION_SHORT_LABELS: Record<string, string> = {
-  marblehead: "MHD",
-  tiburon: "TB",
-};
-function shortLocationLabel(name: string): string {
-  const key = name.trim().toLowerCase();
-  for (const [needle, label] of Object.entries(LOCATION_SHORT_LABELS)) {
-    if (key.includes(needle)) return label;
-  }
-  return name.trim().slice(0, 3).toUpperCase();
 }
 
 // Order levels by the shop's location list so every row reads the same

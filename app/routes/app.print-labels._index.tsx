@@ -27,6 +27,7 @@ import {
 import { authenticate } from "../shopify.server";
 import { searchProducts } from "../services/shopify-api/products.server";
 import { getVariantsInventory } from "../services/shopify-api/inventory.server";
+import { fixMissingBarcodes } from "../services/products/product-issues.server";
 import {
   getDefaultLocation,
   getLocations,
@@ -67,7 +68,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "search");
 
@@ -87,6 +88,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       stock[vid] = level?.quantities.available ?? 0;
     }
     return json({ stock });
+  }
+
+  if (intent === "generateBarcodes") {
+    // Re-read live barcodes first so a variant that got one elsewhere
+    // since it was picked isn't overwritten; generate only for the
+    // still-blank ones. fixMissingBarcodes also patches the Product
+    // Issues report. Returns variantId → barcode for every requested id.
+    const targets = JSON.parse(String(formData.get("targets") ?? "[]")) as Array<{
+      variantId: string;
+      productId: string;
+    }>;
+    if (targets.length === 0) return json({ barcodes: {}, failures: [] });
+    try {
+      const before = await getVariantsInventory(
+        admin,
+        targets.map((t) => t.variantId),
+      );
+      const blank = targets.filter((t) => !before.get(t.variantId)?.barcode);
+      const res = await fixMissingBarcodes(admin, session.shop, blank);
+      const after = await getVariantsInventory(
+        admin,
+        targets.map((t) => t.variantId),
+      );
+      const barcodes: Record<string, string | null> = {};
+      for (const t of targets) {
+        barcodes[t.variantId] = after.get(t.variantId)?.barcode ?? null;
+      }
+      return json({ barcodes, failures: res.failures });
+    } catch (error) {
+      return json({
+        barcodes: {} as Record<string, string | null>,
+        failures: [{ variantId: "", error: String(error) }],
+      });
+    }
   }
 
   // intent === "search"
@@ -128,6 +163,7 @@ interface SelectedVariant {
   productTitle: string;
   variantTitle: string;
   sku: string | null;
+  barcode: string | null;
   selectedOptions: Array<{ name: string; value: string }>;
 }
 
@@ -136,6 +172,8 @@ export default function PrintLabels() {
 
   const searchFetcher = useFetcher<typeof action>();
   const stockFetcher = useFetcher<typeof action>();
+  const barcodeFetcher = useFetcher<typeof action>();
+  const isGeneratingBarcodes = barcodeFetcher.state !== "idle";
   const isSearching = searchFetcher.state !== "idle";
 
   // `?q=` pre-fills the search (Product Issues links here with the SKU
@@ -193,6 +231,48 @@ export default function PrintLabels() {
     }
   }, [stockFetcher.data]);
 
+  // Fold freshly generated barcodes into the selection so the
+  // "no barcode" flags clear.
+  useEffect(() => {
+    if (!barcodeFetcher.data || !("barcodes" in barcodeFetcher.data)) return;
+    const { barcodes, failures } = barcodeFetcher.data as {
+      barcodes: Record<string, string | null>;
+      failures: Array<{ variantId: string; error: string }>;
+    };
+    setSelected((prev) =>
+      prev.map((s) =>
+        s.variantId in barcodes ? { ...s, barcode: barcodes[s.variantId] } : s,
+      ),
+    );
+    if (failures.length > 0) {
+      setError(
+        `Couldn't generate ${failures.length} barcode${failures.length === 1 ? "" : "s"}: ${failures[0].error}`,
+      );
+    }
+  }, [barcodeFetcher.data]);
+
+  const missingBarcode = useMemo(
+    () => selected.filter((s) => !s.barcode?.trim()),
+    [selected],
+  );
+  const missingBarcodeIds = useMemo(
+    () => new Set(missingBarcode.map((s) => s.variantId)),
+    [missingBarcode],
+  );
+
+  const handleGenerateBarcodes = useCallback(() => {
+    if (missingBarcode.length === 0) return;
+    const fd = new FormData();
+    fd.set("intent", "generateBarcodes");
+    fd.set(
+      "targets",
+      JSON.stringify(
+        missingBarcode.map((s) => ({ variantId: s.variantId, productId: s.productId })),
+      ),
+    );
+    barcodeFetcher.submit(fd, { method: "post" });
+  }, [missingBarcode, barcodeFetcher]);
+
   const selectedVariantIds = useMemo(
     () => new Set(selected.map((s) => s.variantId)),
     [selected],
@@ -212,6 +292,7 @@ export default function PrintLabels() {
                   productTitle: product.title,
                   variantTitle: variant.title,
                   sku: variant.sku,
+                  barcode: variant.barcode ?? null,
                   selectedOptions: variant.selectedOptions,
                 },
               ],
@@ -247,6 +328,7 @@ export default function PrintLabels() {
               productTitle: product.title,
               variantTitle: v.title,
               sku: v.sku,
+              barcode: v.barcode ?? null,
               selectedOptions: v.selectedOptions,
             }));
           return additions.length === 0 ? prev : [...prev, ...additions];
@@ -563,9 +645,37 @@ export default function PrintLabels() {
                   </InlineStack>
                 </InlineStack>
 
+                {missingBarcode.length > 0 && (
+                  <Banner
+                    tone="warning"
+                    title={`${missingBarcode.length} selected variant${missingBarcode.length === 1 ? " has" : "s have"} no barcode`}
+                    action={{
+                      content: `Generate ${missingBarcode.length} barcode${missingBarcode.length === 1 ? "" : "s"}`,
+                      onAction: handleGenerateBarcodes,
+                      loading: isGeneratingBarcodes,
+                    }}
+                  >
+                    <p>
+                      Flagged in orange below. Without a barcode the label
+                      prints the SKU instead. Generating assigns each one a
+                      unique FLW barcode in Shopify.
+                    </p>
+                  </Banner>
+                )}
+
                 <ProductGrid
                   cells={cells}
                   qtyLabel="Labels"
+                  getCellStyle={(cell) =>
+                    missingBarcodeIds.has(cell.variantId)
+                      ? { background: "#fff4e5", boxShadow: "inset 0 0 0 1px #f0b76a" }
+                      : undefined
+                  }
+                  getCellSubtext={(cell) =>
+                    missingBarcodeIds.has(cell.variantId) ? (
+                      <span style={{ color: "#b45309" }}>no barcode</span>
+                    ) : null
+                  }
                   onCellChange={handleCellChange}
                   showColumns={{
                     cost: false,

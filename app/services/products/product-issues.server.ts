@@ -24,6 +24,7 @@ import {
   peekCached,
   setCached,
 } from "../cache/shopify-cache.server";
+import { isSuppressedDuplicateGroup } from "../../utils/duplicate-barcodes";
 
 /**
  * Product Issues — one scan of the catalog, bucketed into the things a
@@ -58,6 +59,12 @@ export interface ProductIssuesReport {
   duplicateBarcodes: Array<{ barcode: string; variants: AuditVariant[] }>;
   missingBarcodes: AuditVariant[];
   negativeStock: NegativeStockRow[];
+  /**
+   * Per-location stock for every variant of a product that has at least
+   * one negative variant, so the negative-stock grid can show (and edit)
+   * the sibling sizes too. Absent on reports scanned before it existed.
+   */
+  stockByVariant?: Record<string, StockLevel[]>;
   missingCost: AuditVariant[];
   counts: {
     variants: number;
@@ -110,7 +117,12 @@ function buildCounts(
 function rebuild(
   base: Pick<
     ProductIssuesReport,
-    "scannedAt" | "includeArchived" | "locations" | "variants" | "negativeStock"
+    | "scannedAt"
+    | "includeArchived"
+    | "locations"
+    | "variants"
+    | "negativeStock"
+    | "stockByVariant"
   >,
 ): ProductIssuesReport {
   const barcodes = classifyBarcodes(base.variants);
@@ -153,6 +165,7 @@ export async function scanProductIssues(
     variants.map((v) => v.variantId),
   );
   const negativeStock: NegativeStockRow[] = [];
+  const levelsByVariant = new Map<string, StockLevel[]>();
   for (const v of variants) {
     const inv = invMap.get(v.variantId);
     if (!inv) continue;
@@ -161,6 +174,7 @@ export async function scanProductIssues(
       locationName: l.locationName,
       available: l.quantities.available ?? 0,
     }));
+    levelsByVariant.set(v.variantId, levels);
     const negativeLevels = levels.filter((l) => l.available < 0);
     if (negativeLevels.length === 0) continue;
     negativeStock.push({
@@ -171,12 +185,22 @@ export async function scanProductIssues(
     });
   }
 
+  // Keep sibling stock only for products that show up in negative stock —
+  // the whole catalog's levels would bloat the cached report.
+  const negativeProducts = new Set(negativeStock.map((r) => r.productId));
+  const stockByVariant: Record<string, StockLevel[]> = {};
+  for (const v of variants) {
+    if (!negativeProducts.has(v.productId)) continue;
+    stockByVariant[v.variantId] = levelsByVariant.get(v.variantId) ?? [];
+  }
+
   const report = rebuild({
     scannedAt: new Date().toISOString(),
     includeArchived,
     locations: locations.map((l) => ({ id: l.id, name: l.name })),
     variants,
     negativeStock,
+    stockByVariant,
   });
   await setCached(shop, CACHE_KEYS.PRODUCT_ISSUES, CACHE_TTL.PRODUCT_ISSUES, report);
   return report;
@@ -304,7 +328,7 @@ export async function setNegativeStock(
           locationId,
           reason: "correction",
           source: "product_issues",
-          notes: "Product Issues: negative stock corrected",
+          notes: "Product Issues: stock corrected",
           createdBy,
           changes: {
             create: list.map((c) => ({
@@ -344,7 +368,24 @@ export async function setNegativeStock(
         };
       })
       .filter((row) => row.negativeLevels.length > 0);
-    return rebuild({ ...r, negativeStock });
+    let stockByVariant = r.stockByVariant;
+    if (stockByVariant) {
+      stockByVariant = { ...stockByVariant };
+      for (const [variantId, inv] of invMap) {
+        if (!(variantId in stockByVariant)) continue;
+        stockByVariant[variantId] = inv.levels.map((l) => {
+          const change = changes.find(
+            (c) => c.variantId === variantId && c.locationId === l.locationId,
+          );
+          return {
+            locationId: l.locationId,
+            locationName: l.locationName,
+            available: change ? change.newQuantity : (l.quantities.available ?? 0),
+          };
+        });
+      }
+    }
+    return rebuild({ ...r, negativeStock, stockByVariant });
   });
 
   return { applied: changes.length, skipped, sessionIds };
@@ -518,10 +559,17 @@ export async function fixMissingBarcodes(
   return result;
 }
 
-export async function fixDuplicateBarcodes(admin: AdminApiContext, shop: string) {
+export async function fixDuplicateBarcodes(
+  admin: AdminApiContext,
+  shop: string,
+  opts: { includeSuppressed?: boolean } = {},
+) {
   const report = await getProductIssuesReport(shop);
   if (!report) throw new Error("Run a scan first.");
-  const plan = await planDuplicateFix(report.duplicateBarcodes);
+  const groups = opts.includeSuppressed
+    ? report.duplicateBarcodes
+    : report.duplicateBarcodes.filter((g) => !isSuppressedDuplicateGroup(g));
+  const plan = await planDuplicateFix(groups);
   const result = await generateBarcodesFor(admin, plan.toRegenerate);
   await refreshVariantBarcodes(
     admin,

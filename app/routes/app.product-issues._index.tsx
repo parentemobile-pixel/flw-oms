@@ -40,7 +40,6 @@ import {
   saveMissingCosts,
   scanProductIssues,
   setNegativeStock,
-  type NegativeStockRow,
   type ProductIssuesReport,
   type SetStockTarget,
 } from "../services/products/product-issues.server";
@@ -48,6 +47,7 @@ import type { AuditVariant } from "../services/shopify-api/products.server";
 import { MoneyField } from "../components/MoneyField";
 import { ProductGrid, type GridCell } from "../components/ProductGrid";
 import { relativeTime } from "../utils/relative-time";
+import { isSuppressedDuplicateGroup } from "../utils/duplicate-barcodes";
 
 const TAB_IDS = [
   "duplicate-barcodes",
@@ -155,7 +155,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     if (intent === "fixDuplicateBarcodes") {
-      const res = await fixDuplicateBarcodes(admin, session.shop);
+      const res = await fixDuplicateBarcodes(admin, session.shop, {
+        includeSuppressed: formData.get("includeSuppressed") === "1",
+      });
       return json<ActionResult>({ ok: true, kind: "fixDuplicateBarcodes", ...res });
     }
 
@@ -283,6 +285,30 @@ export default function ProductIssues() {
     [setSearchParams],
   );
 
+  // Colby Davis duplicate groups are hidden unless ?showColby=1.
+  const showColby = searchParams.get("showColby") === "1";
+  const setShowColby = useCallback(
+    (on: boolean) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (on) next.set("showColby", "1");
+          else next.delete("showColby");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const visibleDuplicateGroups = useMemo(
+    () =>
+      (report?.duplicateBarcodes ?? []).filter(
+        (g) => showColby || !isSuppressedDuplicateGroup(g),
+      ),
+    [report?.duplicateBarcodes, showColby],
+  );
+
   const [includeArchived, setIncludeArchived] = useState(
     report?.includeArchived ?? false,
   );
@@ -300,7 +326,7 @@ export default function ProductIssues() {
   const tabs = [
     {
       id: "duplicate-barcodes",
-      content: `Duplicate barcodes${counts ? ` (${counts.duplicateGroups})` : ""}`,
+      content: `Duplicate barcodes${counts ? ` (${visibleDuplicateGroups.length})` : ""}`,
     },
     {
       id: "missing-barcodes",
@@ -383,8 +409,8 @@ export default function ProductIssues() {
                     <SummaryStat label="Variants scanned" value={counts.variants} />
                     <SummaryStat
                       label="Duplicate groups"
-                      value={counts.duplicateGroups}
-                      tone={counts.duplicateGroups > 0 ? "warning" : "success"}
+                      value={visibleDuplicateGroups.length}
+                      tone={visibleDuplicateGroups.length > 0 ? "warning" : "success"}
                     />
                     <SummaryStat
                       label="Missing barcode"
@@ -431,7 +457,14 @@ export default function ProductIssues() {
               <Tabs tabs={tabs} selected={selectedTab} onSelect={selectTab}>
                 <div style={{ padding: "16px" }}>
                   {TAB_IDS[selectedTab] === "duplicate-barcodes" && (
-                    <DuplicatesPanel report={report} q={q} isBusy={isBusy} />
+                    <DuplicatesPanel
+                      report={report}
+                      allGroups={visibleDuplicateGroups}
+                      showColby={showColby}
+                      onShowColbyChange={setShowColby}
+                      q={q}
+                      isBusy={isBusy}
+                    />
                   )}
                   {TAB_IDS[selectedTab] === "missing-barcodes" && (
                     <MissingBarcodesPanel report={report} q={q} isBusy={isBusy} />
@@ -548,10 +581,17 @@ function SummaryStat({
 
 function DuplicatesPanel({
   report,
+  allGroups,
+  showColby,
+  onShowColbyChange,
   q,
   isBusy,
 }: {
   report: ProductIssuesReport;
+  /** Duplicate groups after the Colby Davis toggle is applied. */
+  allGroups: ProductIssuesReport["duplicateBarcodes"];
+  showColby: boolean;
+  onShowColbyChange: (on: boolean) => void;
   q: string;
   isBusy: boolean;
 }) {
@@ -559,26 +599,38 @@ function DuplicatesPanel({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const groups = useMemo(
     () =>
-      report.duplicateBarcodes.filter(
+      allGroups.filter(
         (g) => !q || g.barcode.toLowerCase().includes(q) || g.variants.some((v) => matchesFilter(v, q)),
       ),
-    [report.duplicateBarcodes, q],
+    [allGroups, q],
+  );
+  const hiddenCount = report.duplicateBarcodes.length - allGroups.length;
+  const colbyToggle = (
+    <Checkbox
+      label={`Show Colby Davis${!showColby && hiddenCount > 0 ? ` (${hiddenCount} hidden)` : ""}`}
+      checked={showColby}
+      onChange={onShowColbyChange}
+    />
   );
 
-  if (report.duplicateBarcodes.length === 0) {
+  if (allGroups.length === 0) {
     return (
-      <EmptyState heading="No duplicate barcodes" image="">
-        <Text as="p">Every assigned barcode is unique.</Text>
-      </EmptyState>
+      <BlockStack gap="300">
+        {hiddenCount > 0 && colbyToggle}
+        <EmptyState heading="No duplicate barcodes" image="">
+          <Text as="p">Every assigned barcode is unique.</Text>
+        </EmptyState>
+      </BlockStack>
     );
   }
 
   return (
     <BlockStack gap="300">
+      {colbyToggle}
       <InlineStack align="space-between" blockAlign="center" wrap>
         <Text as="p">
-          {groups.length} of {report.duplicateBarcodes.length} group
-          {report.duplicateBarcodes.length === 1 ? "" : "s"} shown. Fix by hand:
+          {groups.length} of {allGroups.length} group
+          {allGroups.length === 1 ? "" : "s"} shown. Fix by hand:
           open the variant in Shopify, give it a new barcode, then print a fresh
           label — or let the app regenerate one per group.
         </Text>
@@ -661,6 +713,7 @@ function DuplicatesPanel({
           onAction: () => {
             const fd = new FormData();
             fd.set("intent", "fixDuplicateBarcodes");
+            if (showColby) fd.set("includeSuppressed", "1");
             submit(fd, { method: "post" });
             setConfirmOpen(false);
           },
@@ -669,7 +722,7 @@ function DuplicatesPanel({
       >
         <Modal.Section>
           <Text as="p">
-            In each of the {report.counts.duplicateGroups} groups one variant keeps
+            In each of the {allGroups.length} groups one variant keeps
             the existing barcode (preferring an FLW-generated one) and the rest get
             fresh unique codes. You&apos;ll need to print new labels for the changed
             variants.
@@ -828,7 +881,8 @@ function NegativeStockPanel({
 }) {
   const submit = useSubmit();
   const [confirmResetAll, setConfirmResetAll] = useState(false);
-  // drafts[`${locationId}::${variantId}`] = typed new qty (default 0)
+  // drafts[`${locationId}::${variantId}`] = typed new qty. Untouched
+  // negative cells default to 0; untouched sibling sizes to their count.
   const [drafts, setDrafts] = useState<Record<string, number>>({});
   const rows = useMemo(
     () => report.negativeStock.filter((v) => matchesFilter(v, q)),
@@ -838,6 +892,20 @@ function NegativeStockPanel({
     () => new Map(report.negativeStock.map((v) => [v.variantId, v])),
     [report.negativeStock],
   );
+  // Every scanned variant of a product with a negative size, so the
+  // grid can show the sibling sizes' counts and let them be edited too.
+  // Reports scanned before `stockByVariant` existed fall back to
+  // negative cells only.
+  const siblingsByProduct = useMemo(() => {
+    const m = new Map<string, AuditVariant[]>();
+    if (!report.stockByVariant) return m;
+    for (const v of report.variants) {
+      if (!(v.variantId in report.stockByVariant)) continue;
+      if (!m.has(v.productId)) m.set(v.productId, []);
+      m.get(v.productId)!.push(v);
+    }
+    return m;
+  }, [report.variants, report.stockByVariant]);
   // One grid per location that has any negative level.
   const sections = useMemo(() => {
     const seen = new Map(report.locations.map((l) => [l.id, l.name]));
@@ -883,53 +951,99 @@ function NegativeStockPanel({
           {report.counts.negativeStock === 1 ? "" : "s"} ·{" "}
           {report.counts.negativeLevels} location level
           {report.counts.negativeLevels === 1 ? "" : "s"} below zero. Cells are
-          prefilled with 0 — type a corrected count where you know it, then
-          <strong> Save row</strong>. Or archive the product.
+          prefilled with 0 and other sizes with their current count — type a
+          corrected count for any size, then <strong> Save row</strong>. Or
+          archive the product.
         </Text>
         <Button tone="critical" onClick={() => setConfirmResetAll(true)} disabled={isBusy}>
           Reset all to 0
         </Button>
       </InlineStack>
       {sections.map((sec) => {
-        const cells = sec.rows.map((v) => {
-          const level = v.negativeLevels.find((l) => l.locationId === sec.id)!;
-          const cell = toGridCell(v, drafts[`${sec.id}::${v.variantId}`] ?? 0);
-          cell.stock = level.available;
-          return cell;
-        });
+        const stockAt = (variantId: string): number | undefined => {
+          const levels =
+            report.stockByVariant?.[variantId] ?? byId.get(variantId)?.levels;
+          return levels?.find((l) => l.locationId === sec.id)?.available;
+        };
+        const draftKey = (variantId: string) => `${sec.id}::${variantId}`;
+        const defaultQty = (stock: number | undefined) =>
+          stock === undefined || stock < 0 ? 0 : stock;
+
+        // Negative variants plus their siblings in the same row (same
+        // product + non-size options), deduped.
+        const seen = new Set<string>();
+        const cells: GridCell[] = [];
+        for (const row of sec.rows) {
+          const rowKey = rowKeyOf([toGridCell(row, null)]);
+          const siblings = siblingsByProduct.get(row.productId) ?? [row];
+          for (const v of siblings) {
+            if (seen.has(v.variantId)) continue;
+            if (rowKeyOf([toGridCell(v, null)]) !== rowKey) continue;
+            seen.add(v.variantId);
+            const stock = stockAt(v.variantId);
+            const cell = toGridCell(
+              v,
+              drafts[draftKey(v.variantId)] ?? defaultQty(stock),
+            );
+            cell.stock = stock;
+            cells.push(cell);
+          }
+        }
+        const negativeCount = cells.filter((c) => (c.stock ?? 0) < 0).length;
         return (
           <BlockStack key={sec.id} gap="200">
             <Divider />
             <Text as="h3" variant="headingSm">
-              {sec.name} — {cells.length} size{cells.length === 1 ? "" : "s"} below zero
+              {sec.name} — {negativeCount} size{negativeCount === 1 ? "" : "s"} below zero
             </Text>
             <ProductGrid
               cells={cells}
               qtyLabel="New qty"
               onCellChange={(variantId, next) =>
-                setDrafts((p) => ({ ...p, [`${sec.id}::${variantId}`]: next }))
+                setDrafts((p) => ({ ...p, [draftKey(variantId)]: next }))
               }
               showColumns={{ cost: false, retail: false, stock: false, onOrder: false }}
               sizeColumns={GRID_SIZES}
-              getCellStyle={() => ({ background: "#fdecea", boxShadow: "inset 0 0 0 1px #e0b4b4" })}
-              getCellSubtext={(cell) => (
-                <span style={{ color: "#d72c0d", fontWeight: 600 }}>now {cell.stock}</span>
-              )}
+              getCellStyle={(cell) =>
+                (cell.stock ?? 0) < 0
+                  ? { background: "#fdecea", boxShadow: "inset 0 0 0 1px #e0b4b4" }
+                  : undefined
+              }
+              getCellSubtext={(cell) =>
+                (cell.stock ?? 0) < 0 ? (
+                  <span style={{ color: "#d72c0d", fontWeight: 600 }}>now {cell.stock}</span>
+                ) : (
+                  <span style={{ color: "#6d7175" }}>now {cell.stock ?? 0}</span>
+                )
+              }
               stickyLeadColumn
               maxHeight="60vh"
               trailingLabel="Action"
               renderRowTrailing={({ cells: rowCells }) => {
-                const first = byId.get(rowCells[0]?.variantId ?? "");
+                const first = rowCells[0];
+                // Negative cells always go (default 0); other sizes only
+                // when the user changed them — unchanged ones are no-ops.
+                const targets: SetStockTarget[] = rowCells
+                  .filter(
+                    (c) =>
+                      (c.stock ?? 0) < 0 ||
+                      (drafts[draftKey(c.variantId)] !== undefined &&
+                        drafts[draftKey(c.variantId)] !== (c.stock ?? 0)),
+                  )
+                  .map((c) => ({
+                    variantId: c.variantId,
+                    locationId: sec.id,
+                    newQty: drafts[draftKey(c.variantId)] ?? defaultQty(c.stock),
+                  }));
                 return (
                   <NegativeRowActions
                     locationId={sec.id}
                     productId={first?.productId ?? ""}
                     productTitle={first?.productTitle ?? ""}
-                    targets={rowCells.map((c) => ({
-                      variantId: c.variantId,
-                      locationId: sec.id,
-                      newQty: drafts[`${sec.id}::${c.variantId}`] ?? 0,
-                    }))}
+                    targets={targets}
+                    edited={rowCells.some(
+                      (c) => drafts[draftKey(c.variantId)] !== undefined,
+                    )}
                   />
                 );
               }}
@@ -963,16 +1077,17 @@ function NegativeRowActions({
   productId,
   productTitle,
   targets,
+  edited,
 }: {
   locationId: string;
   productId: string;
   productTitle: string;
   targets: SetStockTarget[];
+  edited: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
   const [confirmArchive, setConfirmArchive] = useState(false);
-  const typed = targets.some((t) => t.newQty !== 0);
 
   const save = () => {
     const fd = new FormData();
@@ -991,8 +1106,14 @@ function NegativeRowActions({
   return (
     <BlockStack gap="100" inlineAlign="end">
       <ButtonGroup>
-        <Button size="slim" variant="primary" onClick={save} loading={busy} disabled={busy}>
-          {typed ? "Save row" : "Set row to 0"}
+        <Button
+          size="slim"
+          variant="primary"
+          onClick={save}
+          loading={busy}
+          disabled={busy || targets.length === 0}
+        >
+          {edited ? "Save row" : "Set row to 0"}
         </Button>
         <Button
           size="slim"

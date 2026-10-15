@@ -15,6 +15,7 @@ import {
  *   startDate/endDate   ISO dates of the sales window
  *   destinationName / sourceName   full location names for the header
  *   destLabel / srcLabel           short labels used in the cells
+ *   sameLocation                   "1" = back-room restock list (from == to)
  *
  * Returns the PDF with `Content-Disposition: attachment`. The client
  * fetches it and opens a blob URL in a new tab (blob URLs ignore the
@@ -46,6 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     sourceName: String(fd.get("sourceName") ?? "Source"),
     destLabel: String(fd.get("destLabel") ?? "Dest"),
     srcLabel: String(fd.get("srcLabel") ?? "Src"),
+    sameLocation: fd.get("sameLocation") === "1",
   });
 
   return new Response(new Uint8Array(pdf), {
