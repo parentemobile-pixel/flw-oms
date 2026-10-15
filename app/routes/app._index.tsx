@@ -103,7 +103,7 @@ export default function Index() {
 
   return (
     <Page
-      title="FLW OMS"
+      title="FLW Order Management System (OMS)"
       subtitle="Order management for the FL Woods team"
     >
       <style>{TILE_CSS}</style>
